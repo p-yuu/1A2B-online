@@ -76,15 +76,17 @@ def start_new_round(room_id):
             score_msg += f"{players[p]['name']}: {players[p]['score']} 分\n"
 
         send_to_room(room_id, score_msg)
-        send_to_room(room_id, "END") 
-        for p in list(room["players"]):
-            try:
-                p.close()
-            except:
-                pass
+        send_to_room(room_id, "GAME_OVER_RESTART") 
+        
+        room_players = list(room["players"])
+        if room_id in rooms:
+            del rooms[room_id]
+
+        for p in room_players:
             if p in players:
-                del players[p]
-        del rooms[room_id]
+                players[p]["room"] = None
+                players[p]["history"] = []
+                players[p]["score"] = 0 
         return
     
     # 清空所有人的個人歷史紀錄
@@ -127,181 +129,190 @@ def handle_client(client):
             "history": []
         }
 
-        client.send("\n1. 創建房間\n2. 加入房間\n請輸入選項: ".encode())
-        choice = client.recv(1024).decode().strip()
+        while True:
+            client.send("\n1. 創建房間\n2. 加入房間\n請輸入選項: ".encode())
+            choice = client.recv(1024).decode().strip()
 
-        if choice == "1":
-            client.send("請輸入房號: ".encode())
-            room_id = client.recv(1024).decode().strip()
-            while room_id in rooms:
-                client.send("房號已存在，請重新輸入: ".encode())
-                room_id = client.recv(1024).decode().strip()
-
-            client.send("請輸入密碼數: ".encode())           
-            answer_len = int(client.recv(1024).decode().strip())
-            client.send("請輸入回合數: ".encode())
-            round_limit = int(client.recv(1024).decode().strip())
-
-            rooms[room_id] = {
-                "host": client,
-                "players": [client],
-                "started": False,
-                "state": "LOBBY", 
-                "round_limit": round_limit,
-                "round_now": 0,
-                "answer_len": answer_len,
-                "answer": "",
-                "current_setter_index": 0,
-                "current_guesser_index": 0
-            }
-            players[client]["room"] = room_id
-            client.send(f"房間 {room_id} 創建成功，你是房主\n".encode())
-
-        elif choice == "2":
-            while True:
+            if choice == "1":
                 client.send("請輸入房號: ".encode())
                 room_id = client.recv(1024).decode().strip()
+                while room_id in rooms:
+                    client.send("房號已存在，請重新輸入: ".encode())
+                    room_id = client.recv(1024).decode().strip()
 
-                if room_id in rooms:
-                    break
-                elif room_id.lower() == 'q':
-                    client.send("退出連線\n".encode())
-                    client.close()
-                    return
-                else:
-                    client.send("房間不存在，請重新輸入，或輸入 q 退出\n".encode())
+                client.send("請輸入密碼數: ".encode())           
+                answer_len = int(client.recv(1024).decode().strip())
+                client.send("請輸入回合數: ".encode())
+                round_limit = int(client.recv(1024).decode().strip())
 
-            rooms[room_id]["players"].append(client)
-            players[client]["room"] = room_id
-            send_to_room(room_id, f"{name} 加入房間")
+                rooms[room_id] = {
+                    "host": client,
+                    "players": [client],
+                    "started": False,
+                    "state": "LOBBY", 
+                    "round_limit": round_limit,
+                    "round_now": 0,
+                    "answer_len": answer_len,
+                    "answer": "",
+                    "current_setter_index": 0,
+                    "current_guesser_index": 0
+                }
+                players[client]["room"] = room_id
+                client.send(f"房間 {room_id} 創建成功，你是房主\n".encode())
 
-        else:
-            client.send("輸入錯誤".encode())
-            return
+            elif choice == "2":
+                while True:
+                    client.send("請輸入房號: ".encode())
+                    room_id = client.recv(1024).decode().strip()
 
-        show_room_players(room_id)
+                    if room_id in rooms:
+                        break
+                    elif room_id.lower() == 'q':
+                        client.send("退出連線\n".encode())
+                        client.close()
+                        return
+                    else:
+                        client.send("房間不存在，請重新輸入，或輸入 q 退出\n".encode())
 
-        room = rooms[room_id]
-        while True:
-            msg = client.recv(1024).decode().strip()
-            if not msg:
+                rooms[room_id]["players"].append(client)
+                players[client]["room"] = room_id
+                send_to_room(room_id, f"{name} 加入房間")
+
+            else:
+                client.send("輸入錯誤".encode())
                 continue
 
-            # 房主開始遊戲
-            if (msg == "start" and client == room["host"] and not room["started"]):
-                if len(room["players"]) < 2:
-                    client.send("至少需要2位玩家".encode())
+            show_room_players(room_id)
+
+            room = rooms[room_id]
+            game_loop = True
+            while game_loop:
+                try:
+                    msg = client.recv(1024).decode().strip()
+                except:
+                    break
+                if not msg:
                     continue
 
-                room["started"] = True
-                send_to_room(room_id, "\n遊戲正式開始")
-                start_new_round(room_id)
+                if msg == "QUIT_LOOP" or players[client]["room"] is None:
+                    game_loop = False
+                    break
 
-            # 遊戲進行中
-            elif room["started"]:
-                setter = room["players"][room["current_setter_index"]]
-                answer_len = room["answer_len"]
-
-                # 等待出題階段
-                if room["state"] == "WAITING_FOR_ANSWER":
-                    if client != setter:
-                        client.send("等待出題者設定答案中，請稍候...\n".encode())
-                        continue
-                    
-                    # 檢查出題格式
-                    if (len(msg) != answer_len or not msg.isdigit() or len(set(msg)) != answer_len):
-                        client.send("格式錯誤，請重新輸入:".encode())
-                        continue
-                    
-                    room["answer"] = msg
-                    room["state"] = "PLAYING"
-                    room["current_guesser_index"] = get_next_guesser_index(room, room["current_setter_index"])
-                    current_guesser_name = players[room["players"][room["current_guesser_index"]]]["name"]
-                    send_to_room(room_id, f"答案已設定，開始猜題！\n【輪到玩家 {current_guesser_name} 作答】")
-                    continue
-
-                # 猜題階段
-                elif room["state"] == "PLAYING":
-                    if client == setter:
-                        client.send("你是出題者，無法猜題！\n".encode())
+                # 房主開始遊戲
+                if (msg == "start" and client == room["host"] and not room["started"]):
+                    if len(room["players"]) < 2:
+                        client.send("至少需要2位玩家".encode())
                         continue
 
-                    # 防搶答
-                    current_guesser = room["players"][room["current_guesser_index"]]
-                    if client != current_guesser:
-                        current_guesser_name = players[current_guesser]["name"]
-                        client.send(f"尚未輪到你！目前正由 {current_guesser_name} 作答中...\n".encode())
-                        continue
+                    room["started"] = True
+                    send_to_room(room_id, "\n遊戲正式開始")
+                    start_new_round(room_id)
 
-                    if len(players[client]["history"]) >= CHANCE:
-                        client.send("你已經用完 10 次猜題機會了！\n".encode())
+                # 遊戲進行中
+                elif room["started"]:
+                    setter = room["players"][room["current_setter_index"]]
+                    answer_len = room["answer_len"]
+
+                    # 等待出題階段
+                    if room["state"] == "WAITING_FOR_ANSWER":
+                        if client != setter:
+                            client.send("等待出題者設定答案中，請稍候...\n".encode())
+                            continue
                         
-                        # 換下一位玩家作答
-                        room["current_guesser_index"] = get_next_guesser_index(room, room["current_guesser_index"])
-                        next_guesser_name = players[room["players"][room["current_guesser_index"]]]["name"]
-                        send_to_room(room_id, f"【玩家 {players[client]['name']} 次數已滿。下一位作答玩家: {next_guesser_name}】")
-                        continue
-
-                    guess = msg
-                    if (len(guess) != answer_len or not guess.isdigit() or len(set(guess)) != answer_len):
-                        client.send(f"請輸入{answer_len}位不重複數字\n".encode())
-                        continue
-
-                    A, B = check_answer(room["answer"], guess)
-
-                    # 發送猜測紀錄
-                    players[client]["history"].append(f"{guess} -> {A}A{B}B")
-                    remain_chance = CHANCE - len(players[client]["history"])
-                    history_msg = (
-                        f"\n剩餘猜測次數: {remain_chance} 次\n"
-                        f"--- 你的個人猜測紀錄 ---\n"
-                        f"{'\n'.join(players[client]['history'])}\n"
-                    )
-                    client.send(history_msg.encode())
-                    for p in room["players"]:
-                        if p == client:
-                            continue                            
-                        try:
-                            if p == setter:
-                                p.send(f"\n玩家 {players[client]['name']} 猜測 {guess} -> {A}A{B}B\n".encode())
-                            else:
-                                p.send(f"\n玩家 {players[client]['name']} 猜測結果 -> {A}A{B}B\n".encode())
-                        except:
-                            pass
-
-                    # 有人猜中，立刻終止這一回合
-                    if A == answer_len:
-                        player_name = players[client]["name"]
-                        players[client]["score"] += 1
+                        # 檢查出題格式
+                        if (len(msg) != answer_len or not msg.isdigit() or len(set(msg)) != answer_len):
+                            client.send("格式錯誤，請重新輸入:".encode())
+                            continue
                         
-                        send_to_room(room_id, f"\n{player_name} 猜中了答案！本回合結束\n")
-                        show_current_scores(room_id)
+                        room["answer"] = msg
+                        room["state"] = "PLAYING"
+                        room["current_guesser_index"] = get_next_guesser_index(room, room["current_setter_index"])
+                        current_guesser_name = players[room["players"][room["current_guesser_index"]]]["name"]
+                        send_to_room(room_id, f"答案已設定，開始猜題！\n【輪到玩家 {current_guesser_name} 作答】")
+                        continue
 
-                        # 更新回合資訊，進入下一輪
-                        room["current_setter_index"] = (room["current_setter_index"] + 1) % len(room["players"])
-                        room["round_now"] += 1
-                        start_new_round(room_id)
-                    else:
-                        all_finished = True
-                        for p in room["players"]:
-                            if p != setter: # 只檢查猜題者
-                                if len(players[p]["history"]) < CHANCE:
-                                    all_finished = False
-                                    break
-                                    
-                        if all_finished:
-                            send_to_room(room_id, f"\n本回合無人猜中。正確答案是: {room['answer']}\n")
-                            show_current_scores(room_id)
+                    # 猜題階段
+                    elif room["state"] == "PLAYING":
+                        if client == setter:
+                            client.send("你是出題者，無法猜題！\n".encode())
+                            continue
+
+                        # 防搶答
+                        current_guesser = room["players"][room["current_guesser_index"]]
+                        if client != current_guesser:
+                            current_guesser_name = players[current_guesser]["name"]
+                            client.send(f"尚未輪到你！目前正由 {current_guesser_name} 作答中...\n".encode())
+                            continue
+
+                        if len(players[client]["history"]) >= CHANCE:
+                            client.send("你已經用完 10 次猜題機會了！\n".encode())
                             
-                            # 更新回合資訊，強制進入下一輪
+                            # 換下一位玩家作答
+                            room["current_guesser_index"] = get_next_guesser_index(room, room["current_guesser_index"])
+                            next_guesser_name = players[room["players"][room["current_guesser_index"]]]["name"]
+                            send_to_room(room_id, f"【玩家 {players[client]['name']} 次數已滿。下一位作答玩家: {next_guesser_name}】")
+                            continue
+
+                        guess = msg
+                        if (len(guess) != answer_len or not guess.isdigit() or len(set(guess)) != answer_len):
+                            client.send(f"請輸入{answer_len}位不重複數字\n".encode())
+                            continue
+
+                        A, B = check_answer(room["answer"], guess)
+
+                        # 發送猜測紀錄
+                        players[client]["history"].append(f"{guess} -> {A}A{B}B")
+                        remain_chance = CHANCE - len(players[client]["history"])
+                        history_msg = (
+                            f"\n剩餘猜測次數: {remain_chance} 次\n"
+                            f"--- 你的個人猜測紀錄 ---\n"
+                            f"{'\n'.join(players[client]['history'])}\n"
+                        )
+                        client.send(history_msg.encode())
+                        for p in room["players"]:
+                            if p == client:
+                                continue                            
+                            try:
+                                if p == setter:
+                                    p.send(f"\n玩家 {players[client]['name']} 猜測 {guess} -> {A}A{B}B\n".encode())
+                                else:
+                                    p.send(f"\n玩家 {players[client]['name']} 猜測結果 -> {A}A{B}B\n".encode())
+                            except:
+                                pass
+
+                        # 有人猜中，立刻終止這一回合
+                        if A == answer_len:
+                            player_name = players[client]["name"]
+                            players[client]["score"] += 1
+                            
+                            send_to_room(room_id, f"\n{player_name} 猜中了答案！本回合結束\n")
+                            show_current_scores(room_id)
+
+                            # 更新回合資訊，進入下一輪
                             room["current_setter_index"] = (room["current_setter_index"] + 1) % len(room["players"])
                             room["round_now"] += 1
                             start_new_round(room_id)
                         else:
-                            # 還有其他人沒猜滿，換下一位
-                            room["current_guesser_index"] = get_next_guesser_index(room, room["current_guesser_index"])
-                            next_guesser_name = players[room["players"][room["current_guesser_index"]]]["name"]
-                            send_to_room(room_id, f"【本輪作答玩家: {next_guesser_name}】")
+                            all_finished = True
+                            for p in room["players"]:
+                                if p != setter: # 只檢查猜題者
+                                    if len(players[p]["history"]) < CHANCE:
+                                        all_finished = False
+                                        break
+                                        
+                            if all_finished:
+                                send_to_room(room_id, f"\n本回合無人猜中。正確答案是: {room['answer']}\n")
+                                show_current_scores(room_id)
+                                
+                                # 更新回合資訊，強制進入下一輪
+                                room["current_setter_index"] = (room["current_setter_index"] + 1) % len(room["players"])
+                                room["round_now"] += 1
+                                start_new_round(room_id)
+                            else:
+                                # 還有其他人沒猜滿，換下一位
+                                room["current_guesser_index"] = get_next_guesser_index(room, room["current_guesser_index"])
+                                next_guesser_name = players[room["players"][room["current_guesser_index"]]]["name"]
+                                send_to_room(room_id, f"【本輪作答玩家: {next_guesser_name}】")
 
     except:
         remove_client(client)

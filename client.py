@@ -1,6 +1,6 @@
 import socket
 import threading
-import os
+import time
 
 SERVER_IP = '127.0.0.1'
 SERVER_PORT = 5000
@@ -21,11 +21,10 @@ def receive():
             
             print(message)
 
-            if "END" in message:
-                running = False
-                print("遊戲結束")
-                client.close()
-                os._exit(0)  
+            if "GAME_OVER_RESTART" in message:
+                print("遊戲結束，正在重新開始...") 
+                time.sleep(0.5)
+                client.send("QUIT_LOOP".encode())
 
         except:
             break
