@@ -12,11 +12,14 @@ client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client.connect((SERVER_IP, SERVER_PORT))
 running = True
 send_queue = Queue()
-ui_queue = Queue()
 
 # Flet 元件參考
 chat_area = None
 page_ref = None
+
+ui_queue = Queue()
+room_members = []
+members_column = ft.Column() # 動態更新 UI member list
 
 COLOR_BG = "#F9F2EF"        # 柔和的米白底色
 COLOR_ORANGE = "#F98C53"    # 活力橘 (主要按鈕、房主)
@@ -63,19 +66,40 @@ def write():
 
 # =============== change page ===============
 def change_page(msg):
+    global room_members
     msg = msg.strip()
+    print(f"get mag: {msg}")##
     if msg.startswith("CHOOSE_MODE"):
-        ui_queue.put("/mode_choose")
+        ui_queue.put(("route", "/mode_choose"))
+
     elif msg.startswith("ROOM_ID"):
-        ui_queue.put("/create_room")
+        ui_queue.put(("route", "/create_room"))
+
     elif msg.startswith("ROOM_JOIN_ID"):    
-        ui_queue.put("/join_room")
+        ui_queue.put(("route", "/join_room"))
+
+    elif "ROOM_CREATE_SUCCESS" in msg:
+        ui_queue.put(("route", "/room_waiting_host"))
+
+    elif msg.startswith("ROOM_MEMBER"):
+        print("update member list")##
+        lines = msg.split("\n")
+        room_members[:] = lines[1:]
+        def update_ui():
+            members_column.controls = [
+                ft.Text(name) for name in room_members
+            ]
+            page_ref.update()
+        ui_queue.put(("refresh_member", update_ui))
 
 def process_ui_queue(page):
     try:
         while True:
-            route = ui_queue.get_nowait()
-            page.go(route)
+            event = ui_queue.get_nowait()
+            if event[0] == "route":
+                page.go(event[1])
+            elif event[0] == "refresh_member":
+                event[1]()
     except:
         pass
 
@@ -199,7 +223,7 @@ def host_setting(page):
         print("送出: 房間創建完成")
 
     return ft.View(
-                route="/create_room",
+                route="/host_setting",
                 vertical_alignment=ft.MainAxisAlignment.CENTER,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
@@ -239,7 +263,7 @@ def join_room(page):
         print("送出: 加入房間")
 
     return ft.View(
-                route="/",
+                route="/join_room",
                 vertical_alignment=ft.MainAxisAlignment.CENTER,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
@@ -266,6 +290,41 @@ def join_room(page):
                 ],
             )
 
+def room_waiting_host(page):
+    def start(e):
+        send_queue.put("start")
+        print("送出: 開始遊戲")
+    
+    return ft.View(
+                route="/",
+                vertical_alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=500,
+                            padding=30,
+                            border_radius=20,
+                            content=ft.Column(
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Text("WAITING...",size=30,weight=ft.FontWeight.BOLD,color=COLOR_ORANGE),
+                                    ft.Text("等待房主開始遊戲",size=16,color=COLOR_TEXT),
+                                    ft.Divider(color=COLOR_PEACH, thickness=2),
+                                    ft.Text("房間成員",size=16,color=COLOR_TEXT,weight=ft.FontWeight.BOLD,),
+                                    ft.Container(height=120,content=members_column,),
+                                    ft.Container(height=80),
+                                    ft.Button("開始遊戲",bgcolor=COLOR_GREEN,color=COLOR_TEXT,width=280,height=50,on_click=start,)
+                                ],
+                            )
+                        ),
+                        elevation=10,
+                    ),
+                ],
+            )
+
+
 def main(page: ft.Page):
     global chat_area
     global page_ref
@@ -283,12 +342,18 @@ def main(page: ft.Page):
         page.views.clear()
         if page.route == "/":
             page.views.append(register(page))
+
         elif page.route == "/mode_choose":
             page.views.append(mode_choose(page))
+
         elif page.route == "/create_room":
             page.views.append(host_setting(page))
+
         elif page.route == "/join_room":
             page.views.append(join_room(page))
+
+        elif page.route == "/room_waiting_host":
+            page.views.append(room_waiting_host(page))
         page.update()
 
     page.on_route_change = route_change

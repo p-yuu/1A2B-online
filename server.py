@@ -206,7 +206,8 @@ def handle_client(client):
                 with lock:
                     rooms[room_id]["players"].append(client)
                     players[client]["room"] = room_id
-                send_to_room(room_id, f"{name} 加入房間")
+
+                client.send("JOIN_SUCCESS".encode())
 
             else:
                 client.send("輸入錯誤".encode())
