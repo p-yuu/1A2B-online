@@ -29,8 +29,8 @@ def main(page: ft.Page):
     
     page.title = "1A2B online"
     page.bgcolor = COLOR_BG
-    page.window_width = 300
-    page.window_height = 750
+    page.window.width = 410
+    page.window.height = 820
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     page.vertical_alignment = ft.MainAxisAlignment.START
     page.scroll = ft.ScrollMode.AUTO

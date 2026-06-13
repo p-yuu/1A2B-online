@@ -2,6 +2,7 @@ import socket
 import threading
 import time
 import re
+import queue
 import flet as ft
 
 # 預設連線資訊
@@ -36,6 +37,13 @@ class GameState:
         self.excluded_digits = set()
         # 本地輔助：出題者當前輸入的數字
         self.setter_digits = []
+        # 客戶端 UI 輸入狀態
+        self.receive_buffer = ""
+        self.name_input = ""
+        self.room_id_input = ""
+        self.guess_input = ""
+        self.server_ip = DEFAULT_SERVER_IP
+        self.server_port = str(DEFAULT_SERVER_PORT)
 
 state = GameState()
 
@@ -43,6 +51,10 @@ state = GameState()
 client_socket = None
 running = True
 page_ref = None  # 用於在背景執行緒中刷新 Flet 頁面
+
+# Single source of truth event queue
+event_queue = queue.Queue()
+event_loop_started = False
 
 def all_border(width, color):
     return ft.Border(
@@ -63,284 +75,422 @@ def connect_to_server(ip, port):
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client_socket.connect((ip, int(port)))
         running = True
-        state.error_message = ""
-        return True
+        return True, ""
     except Exception as e:
-        state.error_message = f"無法連線到伺服器: {e}"
-        return False
+        return False, str(e)
+
 
 def clean_and_restart():
     """重置局部房間遊戲狀態，保留姓名與 Socket"""
-    state.is_host = False
-    state.room_id = ""
-    state.room_players = []
     self_name = state.my_name
+    server_ip = state.server_ip
+    server_port = state.server_port
     state.__init__()
     state.my_name = self_name
+    state.server_ip = server_ip
+    state.server_port = server_port
     state.page_state = "ROOM_CHOICE"
 
-def safe_update():
-    """安全地在背景執行緒中更新 Flet 介面"""
-    if page_ref:
+
+def send_to_server(command):
+    global client_socket
+    if not client_socket:
+        return False, "尚未建立伺服器連線。"
+    try:
+        text = command if command.endswith("\n") else command + "\n"
+        client_socket.send(text.encode())
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def dispatch(event):
+    event_queue.put(event)
+
+
+def event_loop():
+    global event_loop_started
+    if event_loop_started:
+        return
+    event_loop_started = True
+    while running:
         try:
-            if page_ref.session is not None:
-                page_ref.update()
+            event = event_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        try:
+            handle_event(event)
         except Exception as e:
-            print(f"UI更新出錯: {e}")
+            print(f"Event loop error: {e}")
+        build_current_screen()
+    safe_update()
+
+
+def handle_server_raw(data):
+    buffer = state.receive_buffer + data
+
+    if "請輸入你的名字:" in buffer:
+        state.page_state = "ENTER_NAME"
+        buffer = buffer.replace("請輸入你的名字:", "")
+
+    if "名字已被使用，請重新輸入" in buffer:
+        state.error_message = "這個名字已經有人用了！請換一個。"
+        state.page_state = "ENTER_NAME"
+        buffer = buffer.replace("名字已被使用，請重新輸入", "")
+
+    if "1. 創建房間" in buffer and "2. 加入房間" in buffer:
+        state.page_state = "ROOM_CHOICE"
+        state.error_message = ""
+        buffer = buffer.replace("1. 創建房間", "")
+        buffer = buffer.replace("2. 加入房間", "")
+
+    if "請輸入房號:" in buffer:
+        if state.intent == "CREATE":
+            state.page_state = "CREATE_ROOM"
+        elif state.intent == "JOIN":
+            state.page_state = "JOIN_ROOM"
+        buffer = buffer.replace("請輸入房號:", "")
+
+    if "房號已存在，請重新輸入" in buffer:
+        state.error_message = "房號已被佔用，請重新輸入"
+        state.page_state = "CREATE_ROOM"
+        buffer = buffer.replace("房號已存在，請重新輸入", "")
+
+    if "房間不存在，請重新輸入" in buffer:
+        state.error_message = "找不到這個房間，請重新確認房號"
+        state.page_state = "JOIN_ROOM"
+        buffer = buffer.replace("房間不存在，請重新輸入", "")
+
+    if "請輸入密碼字數:" in buffer:
+        success, err = send_to_server(str(state.answer_len))
+        if not success:
+            state.error_message = f"自動回覆密碼長度失敗：{err}"
+        buffer = buffer.replace("請輸入密碼字數:", "")
+
+    if "請輸入回合數:" in buffer:
+        success, err = send_to_server(str(state.round_limit))
+        if not success:
+            state.error_message = f"自動回覆回合數失敗：{err}"
+        buffer = buffer.replace("請輸入回合數:", "")
+
+    m_create = re.search(r"房間\s*(\S+)\s*創建成功", buffer)
+    if m_create:
+        state.room_id = m_create.group(1)
+        state.is_host = True
+        state.page_state = "LOBBY"
+        buffer = buffer.replace(m_create.group(0), "")
+
+    if "=== 房間玩家 ===" in buffer:
+        idx = buffer.find("=== 房間玩家 ===")
+        sub = buffer[idx:]
+        lines = [l.strip() for l in sub.split("\n") if l.strip()]
+        players = []
+        for l in lines[1:]:
+            if l.startswith("===") or "創建成功" in l or "1." in l or "請輸入" in l:
+                break
+            players.append(l)
+        if players:
+            state.room_players = players
+            if state.page_state in ["CREATE_ROOM", "JOIN_ROOM", "ROOM_CHOICE"]:
+                state.page_state = "LOBBY"
+
+    m_join = re.search(r"(\S+)\s*加入房間", buffer)
+    if m_join:
+        new_p = m_join.group(1)
+        if new_p not in state.room_players:
+            state.room_players.append(new_p)
+
+    if "=== 新回合開始 ===" in buffer:
+        state.guess_log = []
+        state.personal_history = []
+        state.excluded_digits = set()
+        state.setter_digits = []
+        state.chance_remaining = 10
+        m_setter = re.search(r"目前出題者:\s*(\S+)", buffer)
+        if m_setter:
+            state.setter_name = m_setter.group(1)
+            state.is_setter = (state.setter_name == state.my_name)
+        state.page_state = "GAME_PLAYING"
+        state.system_notify = f"新回合開始！出題者：{state.setter_name}"
+        buffer = buffer.replace("=== 新回合開始 ===", "")
+
+    if "位不重複數字作為答案:" in buffer:
+        m_len = re.search(r"請輸入(\d+)位不重複數字作為答案", buffer)
+        if m_len:
+            state.answer_len = int(m_len.group(1))
+        state.page_state = "SETTER_INPUT"
+        state.is_setter = True
+        state.setter_digits = []
+        buffer = buffer.replace("位不重複數字作為答案:", "")
+
+    if "答案已設定，開始猜題！" in buffer:
+        state.page_state = "GAME_PLAYING"
+        m_turn = re.search(r"【輪到玩家\s*(\S+)\s*作答】", buffer)
+        if m_turn:
+            state.current_guesser = m_turn.group(1)
+            if state.current_guesser == state.my_name:
+                state.system_notify = "🎉 輪到你猜題了！"
+            else:
+                state.system_notify = f"👤 等待 {state.current_guesser} 作答中"
+        buffer = buffer.replace("答案已設定，開始猜題！", "")
+
+    m_turn1 = re.search(r"【本輪作答玩家:\s*(\S+?)】", buffer)
+    if m_turn1:
+        state.current_guesser = m_turn1.group(1)
+        if state.current_guesser == state.my_name:
+            state.system_notify = "🎉 輪到你猜題了！"
+        else:
+            state.system_notify = f"等待 {state.current_guesser} 作答中"
+        buffer = buffer.replace(m_turn1.group(0), "")
+
+    m_turn2 = re.search(r"下一位作答玩家:\s*(\S+?)】", buffer)
+    if m_turn2:
+        state.current_guesser = m_turn2.group(1)
+        if state.current_guesser == state.my_name:
+            state.system_notify = "🎉 輪到你猜題了！"
+        else:
+            state.system_notify = f"等待 {state.current_guesser} 作答中"
+        buffer = buffer.replace(m_turn2.group(0), "")
+
+    m_g1 = re.findall(r"玩家\s*(\S+)\s*猜測\s*(\d+)\s*->?\s*(\d+A\d+B)", buffer)
+    for item in m_g1:
+        log_text = f"👤 {item[0]} 猜測 {item[1]} ➔ {item[2]}"
+        if log_text not in state.guess_log:
+            state.guess_log.append(log_text)
+
+    m_g2 = re.findall(r"玩家\s*(\S+)\s*猜測結果\s*->?\s*(\d+A\d+B)", buffer)
+    for item in m_g2:
+        log_text = f"👤 {item[0]} ➔ {item[1]}"
+        if log_text not in state.guess_log:
+            state.guess_log.append(log_text)
+
+    if "--- 你的個人猜測紀錄 ---" in buffer:
+        idx_h = buffer.find("--- 你的個人猜測紀錄 ---")
+        sub_h = buffer[idx_h:]
+        lines_h = [l.strip() for l in sub_h.split("\n") if l.strip()]
+        personal = []
+        for l in lines_h[1:]:
+            if l.startswith("===") or "玩家" in l or "輪到" in l or "請輸入" in l:
+                break
+            personal.append(l)
+        if personal:
+            state.personal_history = personal
+        m_chance = re.search(r"剩餘猜測次數:\s*(\d+)\s*次", buffer)
+        if m_chance:
+            state.chance_remaining = int(m_chance.group(1))
+
+    round_ended = False
+    if "猜中了答案！本回合結束" in buffer:
+        round_ended = True
+        m_win = re.search(r"(\S+)\s*猜中了答案！本回合結束", buffer)
+        if m_win:
+            state.last_round_msg = f"🎉 恭喜！{m_win.group(1)} 猜中了正確答案！"
+    elif "本回合無人猜中" in buffer:
+        round_ended = True
+        m_fail = re.search(r"本回合無人猜中。正確答案是:\s*(\S+)", buffer)
+        if m_fail:
+            state.last_round_msg = f"😢 殘念！本回合沒人猜中。\n正確答案是: {m_fail.group(1)}"
+
+    if "=== 目前分數 ===" in buffer:
+        idx_s = buffer.find("=== 目前分數 ===")
+        sub_s = buffer[idx_s:]
+        lines_s = [l.strip() for l in sub_s.split("\n") if l.strip()]
+        scores = []
+        for l in lines_s[1:]:
+            if l.startswith("===") or "新回合" in l or "遊戲結束" in l:
+                break
+            parts = l.split(":")
+            if len(parts) == 2:
+                scores.append((parts[0].strip(), parts[1].replace("分", "").strip() + " 分"))
+        state.mid_scores = scores
+        state.page_state = "MID_SCORE"
+        threading.Thread(target=mid_score_delay_transition, daemon=True).start()
+        buffer = buffer.replace("=== 目前分數 ===", "")
+
+    if "=== 最終排名 ===" in buffer:
+        idx_f = buffer.find("=== 最終排名 ===")
+        sub_f = buffer[idx_f:]
+        lines_f = [l.strip() for l in sub_f.split("\n") if l.strip()]
+        standings = []
+        for l in lines_f[1:]:
+            if "GAME_OVER_RESTART" in l:
+                break
+            parts = l.split(":")
+            if len(parts) == 2:
+                standings.append((parts[0].strip(), parts[1].replace("分", "").strip() + " 分"))
+        state.final_standings = standings
+        state.page_state = "FINAL_RANK"
+        buffer = buffer.replace("=== 最終排名 ===", "")
+
+    if "【系統警告】" in buffer:
+        state.error_message = "系統警告：有玩家在對局中斷線！遊戲被迫終止。"
+        state.page_state = "ROOM_CHOICE"
+        buffer = buffer.replace("【系統警告】", "")
+
+    if "GAME_OVER_RESTART" in buffer:
+        time.sleep(0.5)
+        send_to_server("QUIT_LOOP")
+        buffer = buffer.replace("GAME_OVER_RESTART", "")
+
+    state.receive_buffer = buffer
+
+
+def handle_event(event):
+    typ = event.get("type")
+    payload = event.get("payload", {})
+
+    if typ == "CONNECT_REQUEST":
+        state.error_message = ""
+        success, err = connect_to_server(payload.get("ip", state.server_ip), payload.get("port", state.server_port))
+        if not success:
+            state.error_message = f"無法連線到伺服器: {err}"
+            return
+        state.server_ip = payload.get("ip", state.server_ip)
+        state.server_port = payload.get("port", state.server_port)
+        state.name_input = payload.get("name", state.name_input)
+        state.my_name = payload.get("name", state.my_name)
+        state.system_notify = "已連線，等待伺服器回應..."
+        threading.Thread(target=socket_receive_loop, daemon=True).start()
+        send_success, send_err = send_to_server(state.my_name)
+        if not send_success:
+            state.error_message = f"發送名稱失敗：{send_err}"
+
+    elif typ == "SET_NAME_INPUT":
+        state.name_input = payload.get("value", "")
+
+    elif typ == "SET_SERVER_IP":
+        state.server_ip = payload.get("value", "")
+
+    elif typ == "SET_SERVER_PORT":
+        state.server_port = payload.get("value", "")
+
+    elif typ == "SET_ROOM_ID_INPUT":
+        state.room_id_input = payload.get("value", "")
+
+    elif typ == "SET_ANSWER_LEN":
+        state.answer_len = int(payload.get("value", state.answer_len))
+
+    elif typ == "SET_ROUND_LIMIT":
+        state.round_limit = int(payload.get("value", state.round_limit))
+
+    elif typ == "CREATE_ROOM_SELECTED":
+        state.intent = "CREATE"
+        state.error_message = ""
+        send_success, send_err = send_to_server("1")
+        if not send_success:
+            state.error_message = f"發送創建房間指令失敗：{send_err}"
+
+    elif typ == "JOIN_ROOM_SELECTED":
+        state.intent = "JOIN"
+        state.error_message = ""
+        send_success, send_err = send_to_server("2")
+        if not send_success:
+            state.error_message = f"發送加入房間指令失敗：{send_err}"
+
+    elif typ == "SUBMIT_ROOM_ID":
+        room_id = payload.get("room_id", "").strip()
+        if not room_id:
+            state.error_message = "房號不能為空！"
+            return
+        state.room_id_input = room_id
+        state.room_id = room_id
+        state.error_message = ""
+        send_success, send_err = send_to_server(room_id)
+        if not send_success:
+            state.error_message = f"傳送房號失敗：{send_err}"
+
+    elif typ == "START_GAME":
+        send_success, send_err = send_to_server("start")
+        if not send_success:
+            state.error_message = f"傳送開始指令失敗：{send_err}"
+
+    elif typ == "SETTER_DIGIT_PRESS":
+        digit = payload.get("digit")
+        if not digit:
+            return
+        if len(state.setter_digits) >= state.answer_len:
+            return
+        if digit in state.setter_digits:
+            state.error_message = "密碼數字不能重複喔！"
+            return
+        state.setter_digits.append(digit)
+        state.error_message = ""
+
+    elif typ == "SETTER_DIGIT_BACKSPACE":
+        if state.setter_digits:
+            state.setter_digits.pop()
+            state.error_message = ""
+
+    elif typ == "SETTER_DIGIT_CLEAR":
+        state.setter_digits.clear()
+        state.error_message = ""
+
+    elif typ == "SUBMIT_SECRET":
+        if len(state.setter_digits) != state.answer_len:
+            state.error_message = f"密碼長度必須是 {state.answer_len} 位數！"
+            return
+        secret = "".join(state.setter_digits)
+        send_success, send_err = send_to_server(secret)
+        if not send_success:
+            state.error_message = f"發送答案失敗：{send_err}"
+        else:
+            state.error_message = ""
+
+    elif typ == "SET_GUESS_INPUT":
+        state.guess_input = payload.get("value", "")
+
+    elif typ == "SUBMIT_GUESS":
+        val = payload.get("guess", "").strip()
+        if not val:
+            return
+        if len(val) != state.answer_len or not val.isdigit() or len(set(val)) != state.answer_len:
+            state.error_message = f"格式錯誤，請輸入 {state.answer_len} 位不重複數字！"
+            return
+        send_success, send_err = send_to_server(val)
+        if not send_success:
+            state.error_message = f"傳送猜測失敗：{send_err}"
+        else:
+            state.guess_input = ""
+            state.error_message = ""
+
+    elif typ == "TOGGLE_DIGIT_EXCLUDE":
+        digit = payload.get("digit")
+        if digit in state.excluded_digits:
+            state.excluded_digits.remove(digit)
+        else:
+            state.excluded_digits.add(digit)
+
+    elif typ == "CLEAN_AND_RESTART":
+        clean_and_restart()
+
+    elif typ == "SET_ERROR_MESSAGE":
+        state.error_message = payload.get("message", "")
+
+    elif typ == "SERVER_RAW_DATA":
+        handle_server_raw(payload.get("data", ""))
+
+    elif typ == "SERVER_DISCONNECTED":
+        state.error_message = "與伺服器斷開連線！"
+        state.page_state = "ENTER_NAME"
+
 
 def socket_receive_loop():
     """背景執行緒：負責接收伺服器訊息並解析成結構化狀態"""
     global running, client_socket
-    buffer = ""
-    
+
     while running:
         try:
             data = client_socket.recv(1024).decode()
             if not data:
                 break
-            buffer += data
-            print(f"[Server Raw]: {data}") # 調試用，印出伺服器原始文字
-
-            # 處理各種伺服器推播的情境與關鍵字
-            
-            # 1. 名字相關
-            if "請輸入你的名字:" in buffer:
-                state.page_state = "ENTER_NAME"
-                buffer = buffer.replace("請輸入你的名字:", "")
-                
-            if "名字已被使用，請重新輸入" in buffer:
-                state.error_message = "這個名字已經有人用了！請換一個。"
-                state.page_state = "ENTER_NAME"
-                buffer = buffer.replace("名字已被使用，請重新輸入", "")
-
-            # 2. 選單選擇
-            if "1. 創建房間" in buffer and "2. 加入房間" in buffer:
-                state.page_state = "ROOM_CHOICE"
-                state.error_message = ""
-                buffer = ""
-
-            # 3. 房號與加入情況
-            if "請輸入房號:" in buffer:
-                if state.intent == "CREATE":
-                    state.page_state = "CREATE_ROOM"
-                elif state.intent == "JOIN":
-                    state.page_state = "JOIN_ROOM"
-                buffer = buffer.replace("請輸入房號:", "")
-
-            if "房號已存在，請重新輸入" in buffer:
-                state.error_message = "房號已被佔用，請重新輸入"
-                state.page_state = "CREATE_ROOM"
-                buffer = buffer.replace("房號已存在，請重新輸入", "")
-
-            if "房間不存在，請重新輸入" in buffer:
-                state.error_message = "找不到這個房間，請重新確認房號"
-                state.page_state = "JOIN_ROOM"
-                buffer = buffer.replace("房間不存在，請重新輸入", "")
-
-            # 自動回復：密碼字數與回合數
-            if "請輸入密碼字數:" in buffer:
-                client_socket.send(f"{state.answer_len}\n".encode())
-                buffer = buffer.replace("請輸入密碼字數:", "")
-                
-            if "請輸入回合數:" in buffer:
-                client_socket.send(f"{state.round_limit}\n".encode())
-                buffer = buffer.replace("請輸入回合數:", "")
-
-            # 創建房主成功
-            # "房間 123 創建成功，你是房主\n"
-            m_create = re.search(r"房間\s*(\S+)\s*創建成功", buffer)
-            if m_create:
-                state.room_id = m_create.group(1)
-                state.is_host = True
-                state.page_state = "LOBBY"
-                buffer = buffer.replace(m_create.group(0), "")
-
-            # 4. 房內玩家名單解析
-            if "=== 房間玩家 ===" in buffer:
-                # 找到這塊區域
-                idx = buffer.find("=== 房間玩家 ===")
-                sub = buffer[idx:]
-                lines = [l.strip() for l in sub.split("\n") if l.strip()]
-                players = []
-                for l in lines[1:]:
-                    if l.startswith("===") or "創建成功" in l or "1." in l or "請輸入" in l:
-                        break
-                    players.append(l)
-                if players:
-                    state.room_players = players
-                    # 如果當前在建立或加入中，跳轉至大廳
-                    if state.page_state in ["CREATE_ROOM", "JOIN_ROOM", "ROOM_CHOICE"]:
-                        state.page_state = "LOBBY"
-
-            # 新增玩家進入提示
-            m_join = re.search(r"(\S+)\s*加入房間", buffer)
-            if m_join:
-                new_p = m_join.group(1)
-                if new_p not in state.room_players:
-                    state.room_players.append(new_p)
-
-            # 5. 回合啟動
-            if "=== 新回合開始 ===" in buffer:
-                state.guess_log = []
-                state.personal_history = []
-                state.excluded_digits = set()
-                state.setter_digits = []
-                state.chance_remaining = 10
-                
-                m_setter = re.search(r"目前出題者:\s*(\S+)", buffer)
-                if m_setter:
-                    state.setter_name = m_setter.group(1)
-                    state.is_setter = (state.setter_name == state.my_name)
-                
-                state.page_state = "GAME_PLAYING"
-                state.system_notify = f"新回合開始！出題者：{state.setter_name}"
-                # 如果是出題者本人，伺服器通常會發送 "請輸入X位不重複數字作為答案:"
-                buffer = buffer.replace("=== 新回合開始 ===", "")
-
-            if "位不重複數字作為答案:" in buffer:
-                m_len = re.search(r"請輸入(\d+)位不重複數字作為答案", buffer)
-                if m_len:
-                    state.answer_len = int(m_len.group(1))
-                state.page_state = "SETTER_INPUT"
-                state.is_setter = True
-                state.setter_digits = []
-                buffer = buffer.replace("位不重複數字作為答案:", "")
-
-            # 6. 猜題進行時
-            if "答案已設定，開始猜題！" in buffer:
-                state.page_state = "GAME_PLAYING"
-                m_turn = re.search(r"【輪到玩家\s*(\S+)\s*作答】", buffer)
-                if m_turn:
-                    state.current_guesser = m_turn.group(1)
-                    if state.current_guesser == state.my_name:
-                        state.system_notify = "🎉 輪到你猜題了！"
-                    else:
-                        state.system_notify = f"👤 等待 {state.current_guesser} 作答中"
-                buffer = buffer.replace("答案已設定，開始猜題！", "")
-
-            # 接續輪到某玩家
-            m_turn1 = re.search(r"【本輪作答玩家:\s*(\S+?)】", buffer)
-            if m_turn1:
-                state.current_guesser = m_turn1.group(1)
-                if state.current_guesser == state.my_name:
-                    state.system_notify = "🎉 輪到你猜題了！"
-                else:
-                    state.system_notify = f"等待 {state.current_guesser} 作答中"
-                buffer = buffer.replace(m_turn1.group(0), "")
-
-            m_turn2 = re.search(r"下一位作答玩家:\s*(\S+?)】", buffer)
-            if m_turn2:
-                state.current_guesser = m_turn2.group(1)
-                if state.current_guesser == state.my_name:
-                    state.system_notify = "🎉 輪到你猜題了！"
-                else:
-                    state.system_notify = f"等待 {state.current_guesser} 作答中"
-                buffer = buffer.replace(m_turn2.group(0), "")
-
-            # 7. 解析猜測進度紀錄
-            # "玩家 小明 猜測 1234 -> 1A2B" / "玩家 小明 猜測結果 -> 1A2B"
-            m_g1 = re.findall(r"玩家\s*(\S+)\s*猜測\s*(\d+)\s*->?\s*(\d+A\d+B)", buffer)
-            for item in m_g1:
-                log_text = f"👤 {item[0]} 猜測 {item[1]} ➔ {item[2]}"
-                if log_text not in state.guess_log:
-                    state.guess_log.append(log_text)
-                    
-            m_g2 = re.findall(r"玩家\s*(\S+)\s*猜測結果\s*->?\s*(\d+A\d+B)", buffer)
-            for item in m_g2:
-                log_text = f"👤 {item[0]} ➔ {item[1]}"
-                if log_text not in state.guess_log:
-                    state.guess_log.append(log_text)
-
-            # 8. 解析個人歷史紀錄 (答題者端會收到此區塊)
-            if "--- 你的個人猜測紀錄 ---" in buffer:
-                idx_h = buffer.find("--- 你的個人猜測紀錄 ---")
-                sub_h = buffer[idx_h:]
-                lines_h = [l.strip() for l in sub_h.split("\n") if l.strip()]
-                personal = []
-                for l in lines_h[1:]:
-                    if l.startswith("===") or "玩家" in l or "輪到" in l or "請輸入" in l:
-                        break
-                    personal.append(l)
-                if personal:
-                    state.personal_history = personal
-                
-                # 剩餘次數
-                m_chance = re.search(r"剩餘猜測次數:\s*(\d+)\s*次", buffer)
-                if m_chance:
-                    state.chance_remaining = int(m_chance.group(1))
-
-            # 9. 回合結束與分數結算
-            # "Andy 猜中了答案！本回合結束" 或 "本回合無人猜中。正確答案是: 1234"
-            round_ended = False
-            if "猜中了答案！本回合結束" in buffer:
-                round_ended = True
-                m_win = re.search(r"(\S+)\s*猜中了答案！本回合結束", buffer)
-                if m_win:
-                    state.last_round_msg = f"🎉 恭喜！{m_win.group(1)} 猜中了正確答案！"
-                    
-            elif "本回合無人猜中" in buffer:
-                round_ended = True
-                m_fail = re.search(r"本回合無人猜中。正確答案是:\s*(\S+)", buffer)
-                if m_fail:
-                    state.last_round_msg = f"😢 殘念！本回合沒人猜中。\n正確答案是: {m_fail.group(1)}"
-
-            if "=== 目前分數 ===" in buffer:
-                idx_s = buffer.find("=== 目前分數 ===")
-                sub_s = buffer[idx_s:]
-                lines_s = [l.strip() for l in sub_s.split("\n") if l.strip()]
-                scores = []
-                for l in lines_s[1:]:
-                    if l.startswith("===") or "新回合" in l or "遊戲結束" in l:
-                        break
-                    parts = l.split(":")
-                    if len(parts) == 2:
-                        scores.append((parts[0].strip(), parts[1].replace("分", "").strip() + " 分"))
-                state.mid_scores = scores
-                state.page_state = "MID_SCORE"
-                
-                # 依據 UI 需求：停留 5 秒後跳轉 (我們在下面利用執行緒非同步延遲)
-                threading.Thread(target=mid_score_delay_transition, daemon=True).start()
-                buffer = ""
-
-            # 10. 遊戲完全結束
-            if "=== 最終排名 ===" in buffer:
-                idx_f = buffer.find("=== 最終排名 ===")
-                sub_f = buffer[idx_f:]
-                lines_f = [l.strip() for l in sub_f.split("\n") if l.strip()]
-                standings = []
-                for l in lines_f[1:]:
-                    if "GAME_OVER_RESTART" in l:
-                        break
-                    parts = l.split(":")
-                    if len(parts) == 2:
-                        standings.append((parts[0].strip(), parts[1].replace("分", "").strip() + " 分"))
-                state.final_standings = standings
-                state.page_state = "FINAL_RANK"
-                buffer = ""
-
-            # 斷線系統警告
-            if "【系統警告】" in buffer:
-                state.error_message = "系統警告：有玩家在對局中斷線！遊戲被迫終止。"
-                state.page_state = "ROOM_CHOICE"
-                buffer = ""
-
-            if "GAME_OVER_RESTART" in buffer:
-                # 伺服器提示重置，發送 QUIT_LOOP 回應
-                time.sleep(0.5)
-                client_socket.send("QUIT_LOOP".encode())
-                buffer = buffer.replace("GAME_OVER_RESTART", "")
-
-            # 刷新 UI 畫面
-            safe_update()
-
+            print(f"[Server Raw]: {data}")
+            dispatch({"type": "SERVER_RAW_DATA", "payload": {"data": data}})
         except Exception as e:
             print(f"Socket讀取錯誤: {e}")
             break
 
-    # 斷線處理
-    state.error_message = "與伺服器斷開連線！"
-    state.page_state = "ENTER_NAME"
-    safe_update()
+    dispatch({"type": "SERVER_DISCONNECTED"})
+
 
 def mid_score_delay_transition():
     """中場停留5秒，倒數計時後平滑切回遊戲或出題畫面"""
@@ -395,6 +545,8 @@ def main(page: ft.Page):
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         expand=True
     )
+    
+    threading.Thread(target=event_loop, daemon=True).start()
     
     page.add(
         ft.Container(
@@ -462,7 +614,7 @@ def build_current_screen():
 # ----------------------------------------------------
 def render_enter_name():
     name_field = ft.TextField(
-        value=state.my_name,
+        value=state.name_input,
         label="請輸入你的名字 Please input your name",
         label_style=ft.TextStyle(color="#2E221B", size=13),
         border_color="#F98C53",
@@ -472,24 +624,27 @@ def render_enter_name():
         content_padding=15,
         bgcolor="white",
         text_align=ft.TextAlign.CENTER,
+        on_change=lambda e: dispatch({"type": "SET_NAME_INPUT", "payload": {"value": e.control.value}}),
     )
     
     # 手機 APK 高可用：可編輯的 IP 與 Port 設定 (預設收摺)
     ip_field = ft.TextField(
-        value=DEFAULT_SERVER_IP,
+        value=state.server_ip,
         label="伺服器 IP Address",
         border_color="#FCCEB4",
         border_radius=10,
         height=45,
         text_size=12,
+        on_change=lambda e: dispatch({"type": "SET_SERVER_IP", "payload": {"value": e.control.value}}),
     )
     port_field = ft.TextField(
-        value=str(DEFAULT_SERVER_PORT),
+        value=state.server_port,
         label="Port",
         border_color="#FCCEB4",
         border_radius=10,
         height=45,
         text_size=12,
+        on_change=lambda e: dispatch({"type": "SET_SERVER_PORT", "payload": {"value": e.control.value}}),
     )
     
     conn_settings = ft.ExpansionTile(
@@ -504,22 +659,16 @@ def render_enter_name():
 
     def on_start_click(e):
         if not name_field.value.strip():
-            state.error_message = "名字不能為空！"
-            build_current_screen()
+            dispatch({"type": "SET_ERROR_MESSAGE", "payload": {"message": "名字不能為空！"}})
             return
-        
-        state.my_name = name_field.value.strip()
-        state.error_message = "正在連線至伺服器..."
-        build_current_screen()
-        
-        # 連線至自訂的伺服器
-        if connect_to_server(ip_field.value.strip(), port_field.value.strip()):
-            # 連線成功，發送使用者名稱
-            client_socket.send(f"{state.my_name}\n".encode())
-            # 開啟背景接收執行緒
-            threading.Thread(target=socket_receive_loop, daemon=True).start()
-        else:
-            build_current_screen()
+        dispatch({
+            "type": "CONNECT_REQUEST",
+            "payload": {
+                "name": name_field.value.strip(),
+                "ip": ip_field.value.strip(),
+                "port": port_field.value.strip(),
+            }
+        })
 
     start_btn = ft.Button(
         content=ft.Text("START 開始"),
@@ -581,12 +730,10 @@ def render_room_choice():
     )
 
     def on_create_room(e):
-        state.intent = "CREATE"
-        client_socket.send("1\n".encode()) # 傳送創建指令
+        dispatch({"type": "CREATE_ROOM_SELECTED"})
 
     def on_join_room(e):
-        state.intent = "JOIN"
-        client_socket.send("2\n".encode()) # 傳送加入指令
+        dispatch({"type": "JOIN_ROOM_SELECTED"})
 
     create_btn = ft.Button(
         content=ft.Row([
@@ -647,12 +794,14 @@ def render_room_choice():
 # ----------------------------------------------------
 def render_create_room():
     room_id_field = ft.TextField(
+        value=state.room_id_input,
         label="自訂房號 Room ID",
         border_color="#F98C53",
         focused_border_color="#F98C53",
         border_radius=12,
         bgcolor="white",
-        content_padding=15
+        content_padding=15,
+        on_change=lambda e: dispatch({"type": "SET_ROOM_ID_INPUT", "payload": {"value": e.control.value}}),
     )
     
     # 密碼字數下拉選單 (1~10，預設4)
@@ -661,8 +810,9 @@ def render_create_room():
         border_color="#F98C53",
         border_radius=12,
         bgcolor="white",
-        value="4",
-        options=[ft.dropdown.Option(str(i)) for i in range(1, 11)]
+        value=str(state.answer_len),
+        options=[ft.dropdown.Option(str(i)) for i in range(1, 11)],
+        on_select=lambda e: dispatch({"type": "SET_ANSWER_LEN", "payload": {"value": e.control.value}}),
     )
 
     # 回合數下拉選單 (1~10，預設1)
@@ -671,25 +821,20 @@ def render_create_room():
         border_color="#F98C53",
         border_radius=12,
         bgcolor="white",
-        value="1",
-        options=[ft.dropdown.Option(str(i)) for i in range(1, 11)]
+        value=str(state.round_limit),
+        options=[ft.dropdown.Option(str(i)) for i in range(1, 11)],
+        on_select=lambda e: dispatch({"type": "SET_ROUND_LIMIT", "payload": {"value": e.control.value}}),
     )
 
     err_text = ft.Text(state.error_message, color="red", size=12, weight="bold", text_align=ft.TextAlign.CENTER)
 
     def on_submit_create(e):
-        if not room_id_field.value.strip():
-            state.error_message = "房號不能為空！"
-            build_current_screen()
-            return
-        
-        state.room_id = room_id_field.value.strip()
-        state.answer_len = int(len_dropdown.value)
-        state.round_limit = int(round_dropdown.value)
-        state.error_message = ""
-        
-        # 傳送設定房號
-        client_socket.send(f"{state.room_id}\n".encode())
+        dispatch({
+            "type": "SUBMIT_ROOM_ID",
+            "payload": {
+                "room_id": room_id_field.value.strip()
+            }
+        })
 
     submit_btn = ft.Button(
         content=ft.Text("建立並進入房間"),
@@ -706,7 +851,7 @@ def render_create_room():
             ft.Row([
                 ft.IconButton(
                     icon=ft.icons.arrow_back_ios_rounded,
-                    on_click=lambda _: clean_and_restart()
+                    on_click=lambda _: dispatch({"type": "CLEAN_AND_RESTART"})
                 ),
                 ft.Text("CREATE ROOM 創建房間", size=20, weight="bold", color="#F98C53")
             ], alignment=ft.MainAxisAlignment.START),
@@ -730,26 +875,25 @@ def render_create_room():
 # ----------------------------------------------------
 def render_join_room():
     room_id_field = ft.TextField(
+        value=state.room_id_input,
         label="請輸入房號 Please enter Room ID",
         border_color="#F98C53",
         focused_border_color="#F98C53",
         border_radius=12,
         bgcolor="white",
-        content_padding=15
+        content_padding=15,
+        on_change=lambda e: dispatch({"type": "SET_ROOM_ID_INPUT", "payload": {"value": e.control.value}}),
     )
 
     err_text = ft.Text(state.error_message, color="red", size=12, weight="bold", text_align=ft.TextAlign.CENTER)
 
     def on_submit_join(e):
-        if not room_id_field.value.strip():
-            state.error_message = "請輸入有效的房號！"
-            build_current_screen()
-            return
-        
-        state.room_id = room_id_field.value.strip()
-        state.error_message = ""
-        # 傳送加入房號
-        client_socket.send(f"{state.room_id}\n".encode())
+        dispatch({
+            "type": "SUBMIT_ROOM_ID",
+            "payload": {
+                "room_id": room_id_field.value.strip()
+            }
+        })
 
     submit_btn = ft.Button(
         content=ft.Text("JOIN 加入"),
@@ -766,7 +910,7 @@ def render_join_room():
             ft.Row([
                 ft.IconButton(
                     icon=ft.icons.arrow_back_ios_rounded,
-                    on_click=lambda _: clean_and_restart()
+                    on_click=lambda _: dispatch({"type": "CLEAN_AND_RESTART"})
                 ),
                 ft.Text("JOIN ROOM 加入房間", size=20, weight="bold", color="#F98C53")
             ], alignment=ft.MainAxisAlignment.START),
@@ -790,10 +934,9 @@ def render_lobby():
     if state.is_host:
         def start_game_action(e):
             if len(state.room_players) < 2:
-                state.error_message = "大廳人數不足！至少需要 2 位玩家。"
-                build_current_screen()
+                dispatch({"type": "SET_ERROR_MESSAGE", "payload": {"message": "大廳人數不足！至少需要 2 位玩家。"}})
                 return
-            client_socket.send("start\n".encode())
+            dispatch({"type": "START_GAME"})
 
         host_control = ft.Button(
             content=ft.Text("遊戲開始 START GAME"),
@@ -833,7 +976,7 @@ def render_lobby():
                 ft.IconButton(
                     icon=ft.icons.exit_to_app_rounded,
                     icon_color="red",
-                    on_click=lambda _: clean_and_restart()
+                    on_click=lambda _: dispatch({"type": "CLEAN_AND_RESTART"})
                 ),
                 ft.Text(f"房間 ➔ {state.room_id}", size=20, weight="bold", color="#F98C53")
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -887,26 +1030,13 @@ def render_setter_input():
 
     # 虛擬小鍵盤事件處理
     def on_num_key(num):
-        if len(state.setter_digits) >= state.answer_len:
-            return
-        if num in state.setter_digits:
-            state.error_message = "密碼數字不能重複喔！"
-            build_current_screen()
-            return
-        state.setter_digits.append(num)
-        state.error_message = ""
-        build_current_screen()
+        dispatch({"type": "SETTER_DIGIT_PRESS", "payload": {"digit": num}})
 
     def on_backspace(e):
-        if state.setter_digits:
-            state.setter_digits.pop()
-            state.error_message = ""
-            build_current_screen()
+        dispatch({"type": "SETTER_DIGIT_BACKSPACE"})
 
     def on_clear(e):
-        state.setter_digits.clear()
-        state.error_message = ""
-        build_current_screen()
+        dispatch({"type": "SETTER_DIGIT_CLEAR"})
 
     # 設計虛擬數字小鍵盤
     keyboard_grid = ft.Column(spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
@@ -954,14 +1084,7 @@ def render_setter_input():
 
     # 確認出題發送
     def submit_code(e):
-        if len(state.setter_digits) != state.answer_len:
-            state.error_message = f"密碼長度必須是 {state.answer_len} 位數！"
-            build_current_screen()
-            return
-        
-        secret = "".join(state.setter_digits)
-        client_socket.send(f"{secret}\n".encode())
-        # 送出後等待伺服器通知開始猜題，自動切換
+        dispatch({"type": "SUBMIT_SECRET"})
 
     send_btn = ft.Button(
         content=ft.Row([
@@ -1118,11 +1241,7 @@ def render_game_playing():
         exclude_rows = ft.Column(spacing=8, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
         
         def toggle_exclude(digit_num):
-            if digit_num in state.excluded_digits:
-                state.excluded_digits.remove(digit_num)
-            else:
-                state.excluded_digits.add(digit_num)
-            build_current_screen()
+            dispatch({"type": "TOGGLE_DIGIT_EXCLUDE", "payload": {"digit": digit_num}})
 
         # 生成 0~9 兩行按鈕
         for row_idx in range(2):
@@ -1157,6 +1276,7 @@ def render_game_playing():
 
         # 下方輸入答案框
         guess_input_field = ft.TextField(
+            value=state.guess_input,
             label="輸入你的答案 Enter your answer",
             border_color="#F98C53",
             focused_border_color="#F98C53",
@@ -1167,22 +1287,12 @@ def render_game_playing():
             bgcolor="white",
             content_padding=10,
             disabled=not is_my_turn,
-            keyboard_type=ft.KeyboardType.NUMBER
+            keyboard_type=ft.KeyboardType.NUMBER,
+            on_change=lambda e: dispatch({"type": "SET_GUESS_INPUT", "payload": {"value": e.control.value}}),
         )
 
         def submit_guess(e):
-            val = guess_input_field.value.strip()
-            if not val:
-                return
-            if len(val) != state.answer_len or not val.isdigit() or len(set(val)) != state.answer_len:
-                state.error_message = f"格式錯誤，請輸入 {state.answer_len} 位不重複數字！"
-                build_current_screen()
-                return
-            
-            client_socket.send(f"{val}\n".encode())
-            guess_input_field.value = ""
-            state.error_message = ""
-            build_current_screen()
+            dispatch({"type": "SUBMIT_GUESS", "payload": {"guess": guess_input_field.value.strip()}})
 
         send_action_btn = ft.IconButton(
             icon=ft.icons.send_rounded,
@@ -1340,10 +1450,7 @@ def render_final_rank():
         )
 
     def go_back_to_lobby(e):
-        # 伺服器在最終結算後，會送出 GAME_OVER_RESTART 並引導我們送出 QUIT_LOOP 重置。
-        # 此處我們直接觸建清空狀態並跳回選擇房間畫面。
-        clean_and_restart()
-        build_current_screen()
+        dispatch({"type": "CLEAN_AND_RESTART"})
 
     back_btn = ft.Button(
         content=ft.Text("回到主畫面 BACK TO LOBBY"),
