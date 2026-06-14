@@ -4,6 +4,7 @@ import time
 from queue import Queue
 import flet as ft
 import asyncio
+import json
 
 SERVER_IP = '127.0.0.1'
 SERVER_PORT = 5000
@@ -14,42 +15,74 @@ running = True
 send_queue = Queue()
 
 # Flet 元件參考
+COLOR_BG = "#F9F2EF"        # 柔和的米白底色
+COLOR_ORANGE = "#F98C53"    # 活力橘 (主要按鈕、房主)
+COLOR_GREEN = "#D2E0AA"     # 草綠色 (加入房間、答題成功)
+COLOR_GREEN_TEXT = "#89A43D"     # 草綠色 (加入房間、答題成功)
+COLOR_BLUE = "#ABD7FB"      # 水藍色 (開始、加入按鈕)
+COLOR_BLUE_TEXT = "#4598DB"      # 水藍色 (開始、加入按鈕)
+COLOR_PEACH = "#FCCEB4"     # 淺桃色 (卡片背景)
+COLOR_TEXT = "#2C2C2C"      # 深灰色高質感文字
+COLOR_GRAY = "#B8B8B8"      # 標記按鈕被點擊後的灰色
+
 chat_area = None
 page_ref = None
 
 ui_queue = Queue()
 room_members = []
 members_column = ft.Column() # 動態更新 UI member list
+answer_len = None
 
-COLOR_BG = "#F9F2EF"        # 柔和的米白底色
-COLOR_ORANGE = "#F98C53"    # 活力橘 (主要按鈕、房主)
-COLOR_GREEN = "#D2E0AA"     # 草綠色 (加入房間、答題成功)
-COLOR_BLUE = "#ABD7FB"      # 水藍色 (開始、加入按鈕)
-COLOR_PEACH = "#FCCEB4"     # 淺桃色 (卡片背景)
-COLOR_TEXT = "#2C2C2C"      # 深灰色高質感文字
-COLOR_GRAY = "#9E9E9E"      # 標記按鈕被點擊後的灰色
+system_list = []
+system_column = ft.Column()
+remain_chance = None
+remain_text = ft.Text("Remain chance: 10",size=20,weight=ft.FontWeight.BOLD,color=COLOR_GREEN_TEXT)
+history_list = []
+history_column = ft.Column()
+setter_history_list = []
+setter_history_column = ft.Column()
 
 
 def receive():
     global running
 
+    buffer = ""
     while running:
         try:
-            message = client.recv(1024).decode()
-            if not message:
+            data = client.recv(1024).decode()
+            if not data:
                 break
+            buffer += data
 
-            print(message)
-            # 顯示到 Flet
-            if page_ref is not None:
-                change_page(message)
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
 
-            if "GAME_OVER_RESTART" in message:
-                print("遊戲結束，正在重新開始...")
-                time.sleep(0.5)
-                client.send("QUIT_LOOP".encode())
+                try:
+                    message = json.loads(line)
+                except Exception as e:
+                    print("JSON parse error:", line)
+                    continue
 
-        except:
+                print("receiver get:", message)
+                print("\n-----------")
+
+                msg_type = message.get("type")
+
+                # GAME OVER
+                if msg_type == "GAME_OVER_RESTART":
+                    print("遊戲結束，正在重新開始...")
+                    time.sleep(0.5)
+                    client.send("QUIT_LOOP".encode())
+
+                # 顯示到 UI
+                elif page_ref is not None:
+                    change_page(message)
+
+        except Exception as e:
+            print("receive error:", e)
             break
 
 def write():
@@ -60,37 +93,88 @@ def write():
             if not running:
                 break
             client.send(msg.encode())
+            print(f"client send: {msg}")##
 
         except Exception as e:
             print("WRITE ERROR:", e)
 
 # =============== change page ===============
 def change_page(msg):
-    global room_members
-    msg = msg.strip()
-    print(f"get mag: {msg}")##
-    if msg.startswith("CHOOSE_MODE"):
+    global room_members, remain_chance, history_list
+    # print(f"get mag: {msg}")##
+    # print("\n--------")##
+    msg_type = msg.get("type")
+    data = msg.get("data")
+
+    if msg_type =="CHOOSE_MODE":
         ui_queue.put(("route", "/mode_choose"))
 
-    elif msg.startswith("ROOM_ID"):
+    elif msg_type == "ROOM_ID":
         ui_queue.put(("route", "/create_room"))
 
-    elif msg.startswith("ROOM_JOIN_ID"):    
+    elif msg_type == "ROOM_JOIN_ID":    
         ui_queue.put(("route", "/join_room"))
 
-    elif "ROOM_CREATE_SUCCESS" in msg:
+    elif msg_type == "ROOM_CREATE_SUCCESS":
         ui_queue.put(("route", "/room_waiting_host"))
 
-    elif msg.startswith("ROOM_MEMBER"):
+    elif msg_type == "JOIN_SUCCESS":
+        ui_queue.put(("route", "/room_waiting_player"))
+
+    elif msg_type == "ROOM_MEMBER":
         print("update member list")##
-        lines = msg.split("\n")
-        room_members[:] = lines[1:]
+        room_members[:] = data
         def update_ui():
             members_column.controls = [
                 ft.Text(name) for name in room_members
             ]
             page_ref.update()
-        ui_queue.put(("refresh_member", update_ui))
+        ui_queue.put(("refresh", update_ui))
+
+    elif msg_type == "SET_ANSWER":
+        ui_queue.put(("route", "/set_answer"))
+
+    elif msg_type == "GAME_START":
+        ui_queue.put(("route", "/game_page"))
+
+    elif msg_type == "GAME_DATA":
+        remain_chance = msg.get("remain")
+        history_list[:] = msg.get("history")
+        def update_ui():
+            remain_text.value = f"Remain chances: {remain_chance}"
+            history_column.controls = [
+                ft.Text(history, size=16) for history in history_list
+            ]
+            page_ref.update()
+        ui_queue.put(("refresh", update_ui))
+    
+    # elif msg_type == "HISTORY":
+    #     lines = msg.split("\n")
+    #     history_list[:] = lines[1:]
+    #     def update_ui():
+    #         history_column.controls = [
+    #             ft.Text(history, size=16) for history in history_list
+    #         ]
+    #         page_ref.update()
+    #     ui_queue.put(("refresh", update_ui))
+    
+    elif msg_type == "SYSTEM":
+        system_list.append(data)
+        def update_ui():
+            system_column.controls = [
+                ft.Text(system_msg, size=16) for system_msg in system_list
+            ]
+            page_ref.update()
+        ui_queue.put(("refresh", update_ui))
+
+    elif msg_type == "PLAYER_HISTORY":
+        setter_history_list.append(data)
+        def update_ui():
+            setter_history_column.controls = [
+                ft.Text(history_msg, size=16) for history_msg in setter_history_list
+            ]
+            page_ref.update()
+        ui_queue.put(("refresh", update_ui))
 
 def process_ui_queue(page):
     try:
@@ -98,7 +182,7 @@ def process_ui_queue(page):
             event = ui_queue.get_nowait()
             if event[0] == "route":
                 page.go(event[1])
-            elif event[0] == "refresh_member":
+            elif event[0] == "refresh":
                 event[1]()
     except:
         pass
@@ -186,6 +270,7 @@ def mode_choose(page):
             )
 
 def host_setting(page):
+    global answer_len
     room_id_input = ft.TextField(label="請輸房號",border_radius=15,width=280,)
     password_len_input= ft.Dropdown(width=200,
                         options=[
@@ -217,9 +302,10 @@ def host_setting(page):
                     )
 
     def finish_setting(e):
-        send_queue.put(room_id_input.value.strip())
-        send_queue.put(password_len_input.value)
-        send_queue.put(round_num_input.value)
+        global answer_len
+        answer_len = password_len_input.value
+        send_msg = room_id_input.value.strip() + '\n' + password_len_input.value + '\n' + round_num_input.value
+        send_queue.put(send_msg)
         print("送出: 房間創建完成")
 
     return ft.View(
@@ -296,7 +382,7 @@ def room_waiting_host(page):
         print("送出: 開始遊戲")
     
     return ft.View(
-                route="/",
+                route="/room_waiting_host",
                 vertical_alignment=ft.MainAxisAlignment.CENTER,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
@@ -316,6 +402,212 @@ def room_waiting_host(page):
                                     ft.Container(height=120,content=members_column,),
                                     ft.Container(height=80),
                                     ft.Button("開始遊戲",bgcolor=COLOR_GREEN,color=COLOR_TEXT,width=280,height=50,on_click=start,)
+                                ],
+                            )
+                        ),
+                        elevation=10,
+                    ),
+                ],
+            )
+
+def room_waiting_player(page): 
+    return ft.View(
+                route="/room_waiting_player",
+                vertical_alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=500,
+                            padding=30,
+                            border_radius=20,
+                            content=ft.Column(
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Text("WAITING...",size=30,weight=ft.FontWeight.BOLD,color=COLOR_ORANGE),
+                                    ft.Text("等待房主開始遊戲",size=16,color=COLOR_TEXT),
+                                    ft.Divider(color=COLOR_PEACH, thickness=2),
+                                    ft.Text("房間成員",size=16,color=COLOR_TEXT,weight=ft.FontWeight.BOLD,),
+                                    ft.Container(height=120,content=members_column,),
+                                    ft.Container(height=80),
+                                ],
+                            )
+                        ),
+                        elevation=10,
+                    ),
+                ],
+            )
+
+def set_answer(page):
+    ans_input = ft.TextField(label=f"請輸入密碼",border_radius=15,width=280,)
+
+    def start_click(e):
+        send_queue.put(ans_input.value.strip())
+        print(f"送出: {str(ans_input.value.strip())}")
+        page_ref.go("/setter_page")
+
+    return ft.View(
+                route="/set_answer",
+                vertical_alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=500,
+                            padding=30,
+                            border_radius=20,
+                            content=ft.Column(
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Text("SET ANSWER",size=30,weight=ft.FontWeight.BOLD,color=COLOR_ORANGE),
+                                    ft.Text(f"請輸入{answer_len}位不重複數字作為答案",size=16,color=COLOR_TEXT),
+                                    ft.Container(height=80),
+                                    ans_input,
+                                    ft.Container(height=15),
+                                    ft.Button("設定",bgcolor=COLOR_PEACH,color=COLOR_TEXT,width=280,height=50,on_click=start_click,)
+                                ],
+                            )
+                        ),
+                        elevation=10,
+                    ),
+                ],
+            )
+
+def game_page(page):
+    system_note = ft.Column(
+            height=50,
+            width=350,
+            scroll=ft.ScrollMode.AUTO,
+            controls=system_column,
+        )
+    history = ft.Column(
+            height=200,
+            width=350,
+            scroll=ft.ScrollMode.AUTO,
+            controls=history_column,
+        )
+    
+    def toggle_button(e):
+        btn = e.control
+        if btn.bgcolor == COLOR_PEACH:
+            btn.bgcolor = COLOR_GRAY
+        else:
+            btn.bgcolor = COLOR_PEACH
+        page.update()
+    buttons = []
+    for i in range(10):
+        btn = ft.Button(str(i),width=55,height=30,bgcolor=COLOR_PEACH,color=COLOR_TEXT,on_click=toggle_button,)
+        buttons.append(btn)
+
+    guess=ft.TextField(label="請輸入猜測", expand=True)
+    def click_send(e):
+        send_queue.put(guess.value.strip())
+        print(f"送出: guess")
+
+    return ft.View(
+                route="/game_page",
+                vertical_alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Text("ROUND",weight=ft.FontWeight.BOLD,size=30,color=COLOR_ORANGE),
+                    ft.Container(height=5),
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=100,
+                            padding=ft.Padding(left=20,top=5,right=20,bottom=10),
+                            border_radius=20,
+                            content=ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        "system notification",weight=ft.FontWeight.BOLD,size=20,color=COLOR_BLUE_TEXT),
+                                    system_note,
+                                ],
+                            )
+                        ),
+                        elevation=5,
+                    ),
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=500,
+                            padding=20,
+                            border_radius=20,
+                            content=ft.Column(
+                                controls=[
+                                    remain_text,
+                                    ft.Divider(color=COLOR_GREEN, thickness=2),
+                                    ft.Text("歷史猜測紀錄",size=16,color=COLOR_TEXT,weight=ft.FontWeight.BOLD,),
+                                    ft.Container(height=200, content=ft.Column(controls=[history,],)),
+                                    # ft.Container(height=5),
+                                    ft.Row(controls=buttons[:5],alignment=ft.MainAxisAlignment.SPACE_EVENLY,),
+                                    ft.Row(controls=buttons[5:],alignment=ft.MainAxisAlignment.SPACE_EVENLY,),
+                                    ft.Container(height=5),
+                                    ft.Row(
+                                        controls=[
+                                            guess,
+                                            ft.IconButton(ft.Icons.SEND,width=50,height=40,icon_color=COLOR_GREEN_TEXT, on_click=click_send,)
+                                        ]
+                                    )
+                                ],
+                            )
+                        ),
+                        elevation=10,
+                    ),
+                ],
+            )
+
+def setter_page(page):
+    system_note = ft.Column(
+            height=50,
+            width=350,
+            scroll=ft.ScrollMode.AUTO,
+            controls=system_column,
+        )
+    setter_history = ft.Column(
+            height=200,
+            width=350,
+            scroll=ft.ScrollMode.AUTO,
+            controls=setter_history_column,
+        )
+    
+    return ft.View(
+                route="/setter_page",
+                vertical_alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Text("ROUND",weight=ft.FontWeight.BOLD,size=30,color=COLOR_ORANGE),
+                    ft.Container(height=5),
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=100,
+                            padding=ft.Padding(left=20,top=5,right=20,bottom=10),
+                            border_radius=20,
+                            content=ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        "system notification",weight=ft.FontWeight.BOLD,size=20,color=COLOR_BLUE_TEXT),
+                                    system_note,
+                                ],
+                            )
+                        ),
+                        elevation=5,
+                    ),
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=500,
+                            padding=20,
+                            border_radius=20,
+                            content=ft.Column(
+                                controls=[
+                                    remain_text,
+                                    ft.Divider(color=COLOR_GREEN, thickness=2),
+                                    ft.Text("玩家猜測紀錄",size=16,color=COLOR_TEXT,weight=ft.FontWeight.BOLD,),
+                                    ft.Container(height=200, content=ft.Column(controls=[setter_history,],)),
                                 ],
                             )
                         ),
@@ -354,6 +646,22 @@ def main(page: ft.Page):
 
         elif page.route == "/room_waiting_host":
             page.views.append(room_waiting_host(page))
+
+        elif page.route == "/room_waiting_player":
+            page.views.append(room_waiting_player(page))
+
+        elif page.route == "/set_answer":
+            page.views.append(set_answer(page))
+
+        elif page.route == "/set_answer":
+            page.views.append(set_answer(page))
+
+        elif page.route == "/game_page":
+            page.views.append(game_page(page))
+
+        elif page.route == "/setter_page":
+            page.views.append(setter_page(page))
+
         page.update()
 
     page.on_route_change = route_change
