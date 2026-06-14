@@ -1,6 +1,7 @@
 import socket
 import threading
 import time
+import json
 
 SERVER_IP = '127.0.0.1'
 SERVER_PORT = 5000
@@ -13,21 +14,38 @@ running = True
 def receive():
     global running
 
+    buffer = ""
     while running:
         try:
-            message = client.recv(1024).decode()
-            if not message:
+            data = client.recv(1024).decode()
+            if not data:
                 break
-            
-            print(message)
+            buffer += data
 
-            if "GAME_OVER_RESTART" in message:
-                print("遊戲結束，正在重新開始...") 
-                time.sleep(0.5)
-                client.send("QUIT_LOOP".encode())
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
 
-        except:
+                try:
+                    message = json.loads(line)
+                except Exception as e:
+                    print("JSON parse error:", line)
+                    continue
+
+                msg_type = message.get("type")
+
+                # GAME OVER
+                if msg_type == "GAME_OVER_RESTART":
+                    print("遊戲結束，正在重新開始...")
+                    time.sleep(0.5)
+                    client.send("QUIT_LOOP".encode())
+
+        except Exception as e:
+            print("receive error:", e)
             break
+
 
 def write():
     global running

@@ -15,7 +15,7 @@ players = {}
 rooms = {}
 lock = threading.Lock() 
 
-CHANCE = 10
+CHANCE = 3
 
 def send_to_room(room_id, message):
     with lock:
@@ -42,7 +42,7 @@ def show_room_players(room_id):
     send_to_room(room_id, msg)
 
 
-def show_current_scores(room_id):
+def show_current_scores(room_id, client):
     # score_msg = "CURR_SCORE: \n"
     curr_score = []
     with lock:
@@ -54,6 +54,9 @@ def show_current_scores(room_id):
                 curr_score.append(f"{players[p]['name']} : {players[p]['score']} 分")
     msg = {"type": "CURR_SCORE", "data": curr_score}
     send_to_room(room_id, msg)
+    check = client.recv(1024).decode().strip()
+    if not check:
+        return
 
 
 def check_answer(answer, guess):
@@ -75,7 +78,7 @@ def get_next_guesser_index(room, current_index):
     return next_index
 
 
-def start_new_round(room_id):
+def start_new_round(room_id, client):
     with lock:
         if room_id not in rooms:
             return
@@ -87,11 +90,16 @@ def start_new_round(room_id):
         final_rank = []
         with lock:
             sorted_players = sorted(room["players"], key=lambda p: players[p]["score"] if p in players else 0, reverse=True)
+            cnt = 1
             for p in sorted_players:
                 if p in players:
-                    final_rank.append(f"{players[p]['name']}: {players[p]['score']} 分")
+                    final_rank.append(f"第 {cnt} 名: {players[p]['name']} -> {players[p]['score']} 分")
+                    cnt += 1
 
         send_to_room(room_id, {"type": "FINAL_RANK", "data": final_rank})
+        check = client.recv(1024).decode().strip()
+        if not check:
+            return
         send_to_room(room_id, {"type": "GAME_OVER_RESTART"}) 
         
         with lock:
@@ -117,6 +125,7 @@ def start_new_round(room_id):
         answer_len = room["answer_len"]
         room["state"] = "WAITING_FOR_ANSWER"
 
+    send_to_room(room_id, {"type": "GAME_START"})
     send_to_room(room_id, {"type": "SYSTEM", "data": f"新回合開始，目前出題者為 {setter_name}"})
     try:
         setter.sendall((json.dumps({"type":"SET_ANSWER"}) + "\n").encode())
@@ -237,8 +246,8 @@ def handle_client(client):
 
                     with lock:
                         room["started"] = True
-                    send_to_room(room_id, {"type": "GAME_START"})
-                    start_new_round(room_id)
+                    # send_to_room(room_id, {"type": "GAME_START"})
+                    start_new_round(room_id,client)
 
                 # 遊戲進行中
                 elif room["started"]:
@@ -337,13 +346,13 @@ def handle_client(client):
                             with lock:
                                 players[client]["score"] += 1
                             send_to_room(current_room_id, {"type": "SOMEONE_GUESS"})
-                            show_current_scores(current_room_id)
+                            show_current_scores(current_room_id, client)
 
                             # 更新回合資訊，進入下一輪
                             with lock:
                                 room["current_setter_index"] = (room["current_setter_index"] + 1) % len(room["players"])
                                 room["round_now"] += 1
-                            start_new_round(current_room_id)
+                            start_new_round(current_room_id,client)
                         else:
                             all_finished = True
                             with lock:
@@ -355,13 +364,19 @@ def handle_client(client):
                                         
                             if all_finished:
                                 send_to_room(room_id, {"type": "NO_ONE_GUESS", "data": room['answer']})
-                                show_current_scores(room_id)
+                                print("367")##
+                                check = client.recv(1024).decode().strip()
+                                print("get check: ", check)##
+                                if not check:
+                                    return
+                                send_to_room(room_id, {"type": "SOMEONE_GUESS"})
+                                show_current_scores(room_id,client)
                                 
                                 # 更新回合資訊，強制進入下一輪
                                 with lock:
                                     room["current_setter_index"] = (room["current_setter_index"] + 1) % len(room["players"])
                                     room["round_now"] += 1
-                                start_new_round(current_room_id)
+                                start_new_round(current_room_id,client)
                             else:
                                 # 還有其他人沒猜滿，換下一位
                                 with lock:

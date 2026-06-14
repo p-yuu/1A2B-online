@@ -32,15 +32,21 @@ ui_queue = Queue()
 room_members = []
 members_column = ft.Column() # 動態更新 UI member list
 answer_len = None
+curr_answer = None
 
 system_list = []
 system_column = ft.Column()
 remain_chance = None
-remain_text = ft.Text("Remain chance: 10",size=20,weight=ft.FontWeight.BOLD,color=COLOR_GREEN_TEXT)
+remain_text = ft.Text("Remain chance: 3",size=20,weight=ft.FontWeight.BOLD,color=COLOR_GREEN_TEXT)
 history_list = []
 history_column = ft.Column()
 setter_history_list = []
 setter_history_column = ft.Column()
+
+current_rank = []
+current_colume = ft.Column()
+final_rank_list = []
+final_colume = ft.Column()
 
 
 def receive():
@@ -100,9 +106,7 @@ def write():
 
 # =============== change page ===============
 def change_page(msg):
-    global room_members, remain_chance, history_list
-    # print(f"get mag: {msg}")##
-    # print("\n--------")##
+    global room_members, remain_chance, history_list, setter_history_list, current_rank, final_rank_list, curr_answer
     msg_type = msg.get("type")
     data = msg.get("data")
 
@@ -148,16 +152,6 @@ def change_page(msg):
             page_ref.update()
         ui_queue.put(("refresh", update_ui))
     
-    # elif msg_type == "HISTORY":
-    #     lines = msg.split("\n")
-    #     history_list[:] = lines[1:]
-    #     def update_ui():
-    #         history_column.controls = [
-    #             ft.Text(history, size=16) for history in history_list
-    #         ]
-    #         page_ref.update()
-    #     ui_queue.put(("refresh", update_ui))
-    
     elif msg_type == "SYSTEM":
         system_list.append(data)
         def update_ui():
@@ -175,6 +169,35 @@ def change_page(msg):
             ]
             page_ref.update()
         ui_queue.put(("refresh", update_ui))
+
+    elif msg_type == "SOMEONE_GUESS":
+        ui_queue.put(("route", "/curr_rank"))
+
+    elif msg_type == "CURR_SCORE":
+        current_rank[:] = data
+        def update_ui():
+            current_colume.controls = [
+                ft.Text(rank_msg, size=16) for rank_msg in current_rank
+            ]
+            page_ref.update()
+        ui_queue.put(("refresh", update_ui))
+
+    elif msg_type == "GAME_OVER":
+        ui_queue.put(("route", "/final_rank"))
+
+    elif msg_type == "FINAL_RANK":
+        final_rank_list[:] = data
+        def update_ui():
+            final_colume.controls = [
+                ft.Text(rank_msg, size=16) for rank_msg in final_rank_list
+            ]
+            page_ref.update()
+        ui_queue.put(("refresh", update_ui))
+
+    elif msg_type == "NO_ONE_GUESS":
+        curr_answer = data
+        print(curr_answer)##
+        ui_queue.put(("route", "/no_one_guess"))
 
 def process_ui_queue(page):
     try:
@@ -440,11 +463,14 @@ def room_waiting_player(page):
             )
 
 def set_answer(page):
+    global curr_answer
     ans_input = ft.TextField(label=f"請輸入密碼",border_radius=15,width=280,)
 
     def start_click(e):
-        send_queue.put(ans_input.value.strip())
-        print(f"送出: {str(ans_input.value.strip())}")
+        global curr_answer
+        curr_answer = ans_input.value.strip()
+        send_queue.put(curr_answer)
+        print(f"送出: {curr_answer}")
         page_ref.go("/setter_page")
 
     return ft.View(
@@ -504,6 +530,7 @@ def game_page(page):
     guess=ft.TextField(label="請輸入猜測", expand=True)
     def click_send(e):
         send_queue.put(guess.value.strip())
+        guess.value = ""
         print(f"送出: guess")
 
     return ft.View(
@@ -604,9 +631,8 @@ def setter_page(page):
                             border_radius=20,
                             content=ft.Column(
                                 controls=[
-                                    remain_text,
+                                    ft.Text("玩家猜測紀錄",size=16,color=COLOR_GREEN_TEXT,weight=ft.FontWeight.BOLD,),
                                     ft.Divider(color=COLOR_GREEN, thickness=2),
-                                    ft.Text("玩家猜測紀錄",size=16,color=COLOR_TEXT,weight=ft.FontWeight.BOLD,),
                                     ft.Container(height=200, content=ft.Column(controls=[setter_history,],)),
                                 ],
                             )
@@ -616,6 +642,105 @@ def setter_page(page):
                 ],
             )
 
+def curr_rank(page):
+    def next_round(e):
+        send_queue.put("check")
+        print("送出: 確認進入下一輪")
+
+    return ft.View(
+                route="/curr_rank",
+                vertical_alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=500,
+                            padding=30,
+                            border_radius=20,
+                            content=ft.Column(
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Text("CURRENT RANK",size=30,weight=ft.FontWeight.BOLD,color=COLOR_ORANGE),
+                                    ft.Text("當前分數結算",size=16,color=COLOR_TEXT),
+                                    ft.Divider(color=COLOR_PEACH, thickness=2),
+                                    ft.Container(height=120,content=current_colume,),
+                                    ft.Container(height=80),
+                                    ft.Button("NEXT",bgcolor=COLOR_GREEN,color=COLOR_TEXT,width=280,height=50,on_click=next_round,)
+                                ],
+                            )
+                        ),
+                        elevation=10,
+                    ),
+                ],
+            )
+
+def final_rank(page):
+    def next_round(e):
+        send_queue.put("check")
+        print("送出: 確認結束")
+
+    return ft.View(
+                route="/final_rank",
+                vertical_alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=500,
+                            padding=30,
+                            border_radius=20,
+                            content=ft.Column(
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Text("FINAL RANK",size=30,weight=ft.FontWeight.BOLD,color=COLOR_ORANGE),
+                                    ft.Text("最終排名",size=16,color=COLOR_TEXT),
+                                    ft.Divider(color=COLOR_PEACH, thickness=2),
+                                    ft.Container(height=120,content=final_colume,),
+                                    ft.Container(height=80),
+                                    ft.Button("返回主頁",bgcolor=COLOR_PEACH,color=COLOR_TEXT,width=280,height=50,on_click=next_round,)
+                                ],
+                            )
+                        ),
+                        elevation=10,
+                    ),
+                ],
+            )
+
+def no_one_guess(page):
+    def next_round(e):
+        send_queue.put("check")
+        print("送出: 進入 curr rank")
+
+    return ft.View(
+                route="/no_one_guess",
+                vertical_alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Card(
+                        content=ft.Container(
+                            width=350,
+                            height=500,
+                            padding=30,
+                            border_radius=20,
+                            content=ft.Column(
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Text("NO ONE GUESSED",size=30,weight=ft.FontWeight.BOLD,color=COLOR_ORANGE),
+                                    ft.Text("沒有人猜中答案",size=16,color=COLOR_TEXT),
+                                    ft.Divider(color=COLOR_PEACH, thickness=2),
+                                    ft.Text("正確答案",size=16,color=COLOR_TEXT),
+                                    ft.Text(curr_answer,weight=ft.FontWeight.BOLD,size=25,color=COLOR_TEXT),
+                                    ft.Container(height=120),
+                                    ft.Button("NEXT",bgcolor=COLOR_BLUE,color=COLOR_TEXT,width=280,height=50,on_click=next_round)
+                                ],
+                            )
+                        ),
+                        elevation=10,
+                    ),
+                ],
+            )
 
 def main(page: ft.Page):
     global chat_area
@@ -661,6 +786,15 @@ def main(page: ft.Page):
 
         elif page.route == "/setter_page":
             page.views.append(setter_page(page))
+
+        elif page.route == "/curr_rank":
+            page.views.append(curr_rank(page))
+
+        elif page.route == "/final_rank":
+            page.views.append(final_rank(page))
+
+        elif page.route == "/no_one_guess":
+            page.views.append(no_one_guess(page))
 
         page.update()
 
