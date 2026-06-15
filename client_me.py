@@ -9,8 +9,18 @@ import json
 SERVER_IP = '10.118.232.146'
 SERVER_PORT = 5000
 
-client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client.connect((SERVER_IP, SERVER_PORT))
+client = None
+def connect_server(ip):
+    global client
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect((ip, SERVER_PORT))
+
+    receive_thread = threading.Thread(target=receive,daemon=True)
+    write_thread = threading.Thread(target=write,daemon=True)
+
+    receive_thread.start()
+    write_thread.start()
+
 running = True
 send_queue = Queue()
 
@@ -253,18 +263,18 @@ def register(page):
     global SERVER_IP
     ip_input = ft.TextField(label="請輸入伺服器 IP",border_radius=15,width=280,)
     name_input = ft.TextField(label="請輸入你的名字",border_radius=15,width=280,)
-    # tile = ft.ExpansionTile(
-    #     title=ft.Text("連線設定", color=COLOR_GRAY),
-    #     controls=[ip_input,],
-    # )
+    tile = ft.ExpansionTile(
+        title=ft.Text("連線設定", color=COLOR_GRAY),
+        controls=[ip_input,],
+    )
 
     def start_click(e):
         global SERVER_IP
         player_name = name_input.value.strip()
-        # if ip_input.value.strip():
-        #     SERVER_IP = ip_input.value.strip()
-        if player_name == "":
-            return
+        if ip_input.value.strip():
+            SERVER_IP = ip_input.value.strip()
+
+        connect_server(SERVER_IP)
         send_queue.put(player_name)
         print(f"送出: {player_name}")
         print(f"設定: {SERVER_IP}")
@@ -844,11 +854,11 @@ def main(page: ft.Page):
     page.go("/")
     route_change(None)
 
-receive_thread = threading.Thread(target=receive,daemon=True)
-write_thread = threading.Thread(target=write,daemon=True)
+# receive_thread = threading.Thread(target=receive,daemon=True)
+# write_thread = threading.Thread(target=write,daemon=True)
 
-receive_thread.start()
-write_thread.start()
+# receive_thread.start()
+# write_thread.start()
 
 try:
     ft.run(main)
