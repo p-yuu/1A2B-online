@@ -15,7 +15,7 @@ players = {}
 rooms = {}
 lock = threading.Lock() 
 
-CHANCE = 3
+CHANCE = 10
 
 def send_to_room(room_id, message):
     with lock:
@@ -272,6 +272,8 @@ def handle_client(client):
                             room["state"] = "PLAYING"
                             room["current_guesser_index"] = get_next_guesser_index(room, room["current_setter_index"])
                             current_guesser_name = players[room["players"][room["current_guesser_index"]]]["name"]
+
+                        client.sendall((json.dumps({"type":"SET_SUCCESS"}) + "\n").encode())
                         send_to_room(current_room_id, {"type":"SYSTEM", "data": f"答案已設定，輪到玩家 {current_guesser_name} 作答"})
                         continue
 
@@ -364,9 +366,7 @@ def handle_client(client):
                                         
                             if all_finished:
                                 send_to_room(room_id, {"type": "NO_ONE_GUESS", "data": room['answer']})
-                                print("367")##
                                 check = client.recv(1024).decode().strip()
-                                print("get check: ", check)##
                                 if not check:
                                     return
                                 send_to_room(room_id, {"type": "SOMEONE_GUESS"})

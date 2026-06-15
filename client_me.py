@@ -6,7 +6,7 @@ import flet as ft
 import asyncio
 import json
 
-SERVER_IP = '127.0.0.1'
+SERVER_IP = '10.118.232.146'
 SERVER_PORT = 5000
 
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -34,10 +34,13 @@ members_column = ft.Column() # 動態更新 UI member list
 answer_len = None
 curr_answer = None
 
+room_no_exist_text = ft.Text("",size=16,color=ft.Colors.RED)
+set_wrong_text = ft.Text("",size=16,color=ft.Colors.RED)
+
 system_list = []
 system_column = ft.Column()
 remain_chance = None
-remain_text = ft.Text("Remain chance: 3",size=20,weight=ft.FontWeight.BOLD,color=COLOR_GREEN_TEXT)
+remain_text = ft.Text("Remain chance: 10",size=20,weight=ft.FontWeight.BOLD,color=COLOR_GREEN_TEXT)
 history_list = []
 history_column = ft.Column()
 setter_history_list = []
@@ -107,6 +110,7 @@ def write():
 # =============== change page ===============
 def change_page(msg):
     global room_members, remain_chance, history_list, setter_history_list, current_rank, final_rank_list, curr_answer
+    global room_no_exist_text
     msg_type = msg.get("type")
     data = msg.get("data")
 
@@ -119,6 +123,12 @@ def change_page(msg):
     elif msg_type == "ROOM_JOIN_ID":    
         ui_queue.put(("route", "/join_room"))
 
+    elif msg_type == "ROOM_NOT_EXIST":
+        def update_ui():
+            room_no_exist_text.value = "該房間不存在"
+            page_ref.update()
+        ui_queue.put(("refresh", update_ui))
+    
     elif msg_type == "ROOM_CREATE_SUCCESS":
         ui_queue.put(("route", "/room_waiting_host"))
 
@@ -137,6 +147,15 @@ def change_page(msg):
 
     elif msg_type == "SET_ANSWER":
         ui_queue.put(("route", "/set_answer"))
+
+    elif msg_type == "PASSWORD_FORMAT_WRONG":
+        def update_ui():
+            set_wrong_text.value = "答案格式錯誤"
+            page_ref.update()
+        ui_queue.put(("refresh", update_ui))
+
+    elif msg_type == "SET_SUCCESS":
+        ui_queue.put(("route", "/setter_page"))
 
     elif msg_type == "GAME_START":
         ui_queue.put(("route", "/game_page"))
@@ -181,6 +200,7 @@ def change_page(msg):
             ]
             page_ref.update()
         ui_queue.put(("refresh", update_ui))
+        reset()
 
     elif msg_type == "GAME_OVER":
         ui_queue.put(("route", "/final_rank"))
@@ -196,8 +216,20 @@ def change_page(msg):
 
     elif msg_type == "NO_ONE_GUESS":
         curr_answer = data
-        print(curr_answer)##
         ui_queue.put(("route", "/no_one_guess"))
+
+def reset():
+    global system_list, system_column, remain_chance, remain_text, history_list, history_column, setter_history_list
+    global setter_history_column, set_wrong_text
+    system_list.clear()
+    system_column.controls.clear()
+    remain_chance = None
+    remain_text.value = "Remain chance: 10"
+    history_list.clear()
+    history_column.controls.clear()
+    setter_history_list.clear()
+    setter_history_column.controls.clear()
+    set_wrong_text.value = ""
 
 def process_ui_queue(page):
     try:
@@ -218,14 +250,24 @@ async def ui_loop():
 
 # =============== page function ===============
 def register(page):
+    global SERVER_IP
+    ip_input = ft.TextField(label="請輸入伺服器 IP",border_radius=15,width=280,)
     name_input = ft.TextField(label="請輸入你的名字",border_radius=15,width=280,)
+    # tile = ft.ExpansionTile(
+    #     title=ft.Text("連線設定", color=COLOR_GRAY),
+    #     controls=[ip_input,],
+    # )
 
     def start_click(e):
+        global SERVER_IP
         player_name = name_input.value.strip()
+        # if ip_input.value.strip():
+        #     SERVER_IP = ip_input.value.strip()
         if player_name == "":
             return
         send_queue.put(player_name)
         print(f"送出: {player_name}")
+        print(f"設定: {SERVER_IP}")
 
     return ft.View(
                 route="/",
@@ -245,6 +287,7 @@ def register(page):
                                     ft.Text("歡迎來到 1A2B online",size=16,color=COLOR_TEXT),
                                     ft.Container(height=80),
                                     name_input,
+                                    tile,
                                     ft.Container(height=15),
                                     ft.Button("START 開始",bgcolor=COLOR_BLUE,color=COLOR_TEXT,width=280,height=50,on_click=start_click,)
                                 ],
@@ -389,7 +432,7 @@ def join_room(page):
                                     ft.Text("加入已經創建好的房間吧",size=16,color=COLOR_TEXT),
                                     ft.Container(height=80),
                                     room_id,
-                                    ft.Container(height=15),
+                                    ft.Container(height=20, content=room_no_exist_text,),
                                     ft.Button("加入",bgcolor=COLOR_BLUE,color=COLOR_TEXT,width=280,height=50,on_click=join_room_click,)
                                 ],
                             )
@@ -471,7 +514,6 @@ def set_answer(page):
         curr_answer = ans_input.value.strip()
         send_queue.put(curr_answer)
         print(f"送出: {curr_answer}")
-        page_ref.go("/setter_page")
 
     return ft.View(
                 route="/set_answer",
@@ -491,7 +533,7 @@ def set_answer(page):
                                     ft.Text(f"請輸入{answer_len}位不重複數字作為答案",size=16,color=COLOR_TEXT),
                                     ft.Container(height=80),
                                     ans_input,
-                                    ft.Container(height=15),
+                                    ft.Container(height=20, content=set_wrong_text,),
                                     ft.Button("設定",bgcolor=COLOR_PEACH,color=COLOR_TEXT,width=280,height=50,on_click=start_click,)
                                 ],
                             )
