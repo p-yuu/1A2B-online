@@ -25,16 +25,16 @@ def connect_server(ip):
 running = True
 send_queue = Queue()
 
-# Flet 元件參考
-COLOR_BG = "#F9F2EF"        # 柔和的米白底色
-COLOR_ORANGE = "#F98C53"    # 活力橘 (主要按鈕、房主)
-COLOR_GREEN = "#D2E0AA"     # 草綠色 (加入房間、答題成功)
-COLOR_GREEN_TEXT = "#89A43D"     # 草綠色 (加入房間、答題成功)
-COLOR_BLUE = "#ABD7FB"      # 水藍色 (開始、加入按鈕)
-COLOR_BLUE_TEXT = "#4598DB"      # 水藍色 (開始、加入按鈕)
-COLOR_PEACH = "#FCCEB4"     # 淺桃色 (卡片背景)
-COLOR_TEXT = "#2C2C2C"      # 深灰色高質感文字
-COLOR_GRAY = "#B8B8B8"      # 標記按鈕被點擊後的灰色
+# Flet 工具
+COLOR_BG = "#F9F2EF"
+COLOR_ORANGE = "#F98C53"
+COLOR_GREEN = "#D2E0AA"     
+COLOR_GREEN_TEXT = "#89A43D"     
+COLOR_BLUE = "#ABD7FB"      
+COLOR_BLUE_TEXT = "#4598DB"      
+COLOR_PEACH = "#FCCEB4"     
+COLOR_TEXT = "#2C2C2C"      
+COLOR_GRAY = "#B8B8B8"      
 
 chat_area = None
 page_ref = None
@@ -927,12 +927,6 @@ def main(page: ft.Page):
     page.on_route_change = route_change
     page.go("/")
     route_change(None)
-
-# receive_thread = threading.Thread(target=receive,daemon=True)
-# write_thread = threading.Thread(target=write,daemon=True)
-
-# receive_thread.start()
-# write_thread.start()
 
 try:
     ft.run(main)

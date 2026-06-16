@@ -355,15 +355,7 @@ def handle_client(client):
                             history_list = list(players[client]["history"])
                             client_name = players[client]["name"]
                             
-                        # history_msg = f"\n剩餘猜測次數: {remain_chance} 次\n--- 你的個人猜測紀錄 ---\n" + "\n".join(history_list) + "\n"
                         client.sendall((json.dumps({"type":"GAME_DATA", "remain": remain_chance, "history": history_list}) + "\n").encode())
-
-                        # game_data = {
-                        #     "state": "GAME_DATA",
-                        #     "remain_chance": remain_chance,
-                        #     "history": history_list
-                        # }
-                        # client.sendall((json.dumps(game_data) + "\n").encode())
                                                 
                         with lock:
                             room_players_snapshot = list(room["players"])
