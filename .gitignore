@@ -4,3 +4,6 @@ client_UI_new.py
 cliet_flet_simple.py
 *.docx
 /flet_learn
+/file_deliver_test
+/garbage
+/build

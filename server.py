@@ -17,17 +17,38 @@ lock = threading.Lock()
 
 CHANCE = 10
 
+def recv_msg(client, buffer):
+    data = client.recv(1024).decode()
+    if not data:
+        return None, None, buffer
+    buffer += data
+
+    if "\n" not in buffer:
+        return None, None, buffer
+
+    line, buffer = buffer.split("\n", 1)
+    line = line.strip()
+
+    if not line:
+        return None, None, buffer
+
+    try:
+        msg = json.loads(line)
+        return msg.get("type"), msg.get("data"), buffer
+
+    except json.JSONDecodeError:
+        return None, line, buffer
+
 def send_to_room(room_id, message):
+    if room_id not in rooms:
+        return
     with lock:
-        if room_id not in rooms:
-            return
         current_players = list(rooms[room_id]["players"])
-        
-        for client in current_players:
-            try:
-                client.sendall((json.dumps(message) + "\n").encode())
-            except:
-                pass
+    for client in current_players:
+        try:
+            client.sendall((json.dumps(message) + "\n").encode())
+        except:
+            pass
         
 
 def show_room_players(room_id):
@@ -38,25 +59,25 @@ def show_room_players(room_id):
         names = [players[client]["name"] for client in room["players"] if client in players]
                 
     msg = {"type": "ROOM_MEMBER", "data": names}
-    # msg = "\nROOM_MEMBER: \n" + "\n".join(names) + "\n"
     send_to_room(room_id, msg)
 
 
-def show_current_scores(room_id, client):
-    # score_msg = "CURR_SCORE: \n"
+def show_current_scores(room_id, client, buffer):
     curr_score = []
     with lock:
         if room_id not in rooms:
-            return
+            return buffer
         room = rooms[room_id]
         for p in room["players"]:
             if p in players:
                 curr_score.append(f"{players[p]['name']} : {players[p]['score']} 分")
     msg = {"type": "CURR_SCORE", "data": curr_score}
     send_to_room(room_id, msg)
-    check = client.recv(1024).decode().strip()
+    msg_type, check, buffer = recv_msg(client, buffer)
+    
     if not check:
-        return
+        return buffer
+    return buffer
 
 
 def check_answer(answer, guess):
@@ -78,7 +99,7 @@ def get_next_guesser_index(room, current_index):
     return next_index
 
 
-def start_new_round(room_id, client):
+def start_new_round(room_id, client, buffer):
     with lock:
         if room_id not in rooms:
             return
@@ -97,22 +118,7 @@ def start_new_round(room_id, client):
                     cnt += 1
 
         send_to_room(room_id, {"type": "FINAL_RANK", "data": final_rank})
-        check = client.recv(1024).decode().strip()
-        if not check:
-            return
-        send_to_room(room_id, {"type": "GAME_OVER_RESTART"}) 
-        
-        with lock:
-            room_players = list(room["players"])
-            if room_id in rooms:
-                del rooms[room_id]
-
-            for p in room_players:
-                if p in players:
-                    players[p]["room"] = None
-                    players[p]["history"] = []
-                    players[p]["score"] = 0 
-        return
+        return buffer
     
     # 清空所有人的個人歷史紀錄
     with lock:
@@ -129,15 +135,16 @@ def start_new_round(room_id, client):
     send_to_room(room_id, {"type": "SYSTEM", "data": f"新回合開始，目前出題者為 {setter_name}"})
     try:
         setter.sendall((json.dumps({"type":"SET_ANSWER"}) + "\n").encode())
-        # setter.send(f"請輸入{answer_len}位不重複數字作為答案:".encode())
     except:
         pass
+    return buffer
 
 def handle_client(client):
     try:
+        buffer = ""
         while True:
             client.sendall((json.dumps({"type":"NAME"}) + "\n").encode())
-            name = client.recv(1024).decode().strip()
+            msg_type, name, buffer = recv_msg(client, buffer)
             if not name:
                 return
 
@@ -159,12 +166,12 @@ def handle_client(client):
 
         while True:
             client.sendall((json.dumps({"type":"CHOOSE_MODE"}) + "\n").encode())
-            choice = client.recv(1024).decode().strip()
+            msg_type, choice, buffer = recv_msg(client, buffer)
             if not choice: return
 
             if choice == "1":
                 client.sendall((json.dumps({"type":"ROOM_ID"}) + "\n").encode())
-                room_id = client.recv(1024).decode().strip()
+                msg_type, room_id, buffer = recv_msg(client, buffer)
                 if not room_id: return
 
                 setting_msg = room_id.split("\n")
@@ -183,7 +190,8 @@ def handle_client(client):
                         "answer_len": answer_len,
                         "answer": "",
                         "current_setter_index": 0,
-                        "current_guesser_index": 0
+                        "current_guesser_index": 0,
+                        "confirm_restart": set()
                     }
                     players[client]["room"] = room_id
                 client.sendall((json.dumps({"type":"ROOM_CREATE_SUCCESS"}) + "\n").encode())
@@ -191,17 +199,13 @@ def handle_client(client):
             elif choice == "2":
                 while True:
                     client.sendall((json.dumps({"type":"ROOM_JOIN_ID"}) + "\n").encode())
-                    room_id = client.recv(1024).decode().strip()
+                    msg_type, room_id, buffer = recv_msg(client, buffer)
                     if not room_id: return
 
                     with lock:
                         room_exists = room_id in rooms
                     if room_exists:
                         break
-                    # elif room_id.lower() == 'q':
-                    #     client.send("退出連線\n".encode())
-                    #     client.close()
-                    #     return
                     else:
                         client.sendall((json.dumps({"type":"ROOM_NOT_EXIST"}) + "\n").encode())
 
@@ -217,11 +221,10 @@ def handle_client(client):
 
             show_room_players(room_id)
 
-            # room = rooms[room_id]
             game_loop = True
             while game_loop:
                 try:
-                    msg = client.recv(1024).decode().strip()
+                    msg_type, msg, buffer = recv_msg(client, buffer)
                 except:
                     break
                 if not msg:
@@ -234,20 +237,52 @@ def handle_client(client):
                         break
                     room = rooms[current_room_id]
 
-                if msg == "QUIT_LOOP":
+                if msg_type == "QUIT_LOOP":
                     game_loop = False
                     break
+
+                elif msg_type == "image":
+                    send_to_room(room_id, {"type": "IMAGE", "data": msg})
+                    
+
+                elif msg_type == "CONFIRM_GAME_OVER":
+                    should_restart = False
+                    room_players = []
+
+                    with lock:
+                        room = rooms.get(room_id)
+                        if not room:
+                            return
+
+                        room.setdefault("confirm_restart", set())
+                        room["confirm_restart"].add(client)
+
+                        if room["confirm_restart"] == set(room["players"]):
+                            should_restart = True
+
+                            room_players = list(room["players"])
+                            for p in room_players:
+                                if p in players:
+                                    players[p]["room"] = None
+                                    players[p]["history"] = []
+                                    players[p]["score"] = 0
+
+                    if should_restart:
+                        send_to_room(room_id, {"type": "GAME_OVER_RESTART"})
+
+                        with lock:
+                            if room_id in rooms:
+                                del rooms[room_id]
 
                 # 房主開始遊戲
                 if (msg == "start" and client == room["host"] and not room["started"]):
                     if len(room["players"]) < 2:                        
-                        client.sendall((json.dumps({"type":"SYSTEM", "data": "至少需要2位玩家"}) + "\n").encode())
+                        client.sendall((json.dumps({"type":"NOT_ENOUGH_PLAYER"}) + "\n").encode())
                         continue
 
                     with lock:
                         room["started"] = True
-                    # send_to_room(room_id, {"type": "GAME_START"})
-                    start_new_round(room_id,client)
+                    buffer = start_new_round(room_id,client, buffer)
 
                 # 遊戲進行中
                 elif room["started"]:
@@ -305,8 +340,7 @@ def handle_client(client):
                             continue
 
                         guess = msg
-                        if (len(guess) != answer_len or not guess.isdigit() or len(set(guess)) != answer_len):
-                            # client.send(f"GUESS".encode())                            
+                        if (len(guess) != answer_len or not guess.isdigit() or len(set(guess)) != answer_len):       
                             client.sendall((json.dumps({"type":"SYSTEM", "data": f"請輸入{answer_len}位不重複數字"}) + "\n").encode())
                             continue
 
@@ -348,13 +382,13 @@ def handle_client(client):
                             with lock:
                                 players[client]["score"] += 1
                             send_to_room(current_room_id, {"type": "SOMEONE_GUESS"})
-                            show_current_scores(current_room_id, client)
+                            buffer = show_current_scores(current_room_id, client, buffer)
 
                             # 更新回合資訊，進入下一輪
                             with lock:
                                 room["current_setter_index"] = (room["current_setter_index"] + 1) % len(room["players"])
                                 room["round_now"] += 1
-                            start_new_round(current_room_id,client)
+                            buffer = start_new_round(current_room_id,client, buffer)
                         else:
                             all_finished = True
                             with lock:
@@ -366,17 +400,17 @@ def handle_client(client):
                                         
                             if all_finished:
                                 send_to_room(room_id, {"type": "NO_ONE_GUESS", "data": room['answer']})
-                                check = client.recv(1024).decode().strip()
+                                msg_type, check, buffer = recv_msg(client, buffer)
                                 if not check:
                                     return
                                 send_to_room(room_id, {"type": "SOMEONE_GUESS"})
-                                show_current_scores(room_id,client)
+                                buffer = show_current_scores(room_id,client, buffer)
                                 
                                 # 更新回合資訊，強制進入下一輪
                                 with lock:
                                     room["current_setter_index"] = (room["current_setter_index"] + 1) % len(room["players"])
                                     room["round_now"] += 1
-                                start_new_round(current_room_id,client)
+                                buffer = start_new_round(current_room_id,client, buffer)
                             else:
                                 # 還有其他人沒猜滿，換下一位
                                 with lock:

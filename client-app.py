@@ -5,6 +5,7 @@ from queue import Queue
 import flet as ft
 import asyncio
 import json
+import base64
 
 SERVER_IP = '10.118.232.146'
 SERVER_PORT = 5000
@@ -46,6 +47,7 @@ curr_answer = None
 
 room_no_exist_text = ft.Text("",size=16,color=ft.Colors.RED)
 set_wrong_text = ft.Text("",size=16,color=ft.Colors.RED)
+not_enough_player_text = ft.Text("",size=16,color=ft.Colors.RED)
 
 system_list = []
 system_column = ft.Column()
@@ -55,6 +57,8 @@ history_list = []
 history_column = ft.Column()
 setter_history_list = []
 setter_history_column = ft.Column()
+
+image_column = ft.Column()
 
 current_rank = []
 current_colume = ft.Column()
@@ -94,7 +98,7 @@ def receive():
                 if msg_type == "GAME_OVER_RESTART":
                     print("遊戲結束，正在重新開始...")
                     time.sleep(0.5)
-                    client.send("QUIT_LOOP".encode())
+                    client.sendall((json.dumps({"type":"QUIT_LOOP", "data": "1"}) + "\n").encode())
 
                 # 顯示到 UI
                 elif page_ref is not None:
@@ -109,10 +113,15 @@ def write():
     while running:
         try:
             msg = send_queue.get()
+            msg_type = msg["type"]
+            msg_data = msg["data"]
             if not running:
                 break
-            client.send(msg.encode())
-            print(f"client send: {msg}")##
+            client.sendall((json.dumps({"type": msg_type, "data": msg_data}) + "\n").encode())
+            if msg_type != "image":
+                print(f"client send: {msg}")##
+            else:
+                print("client send: image")##
 
         except Exception as e:
             print("WRITE ERROR:", e)
@@ -120,7 +129,7 @@ def write():
 # =============== change page ===============
 def change_page(msg):
     global room_members, remain_chance, history_list, setter_history_list, current_rank, final_rank_list, curr_answer
-    global room_no_exist_text
+    global room_no_exist_text, image_column
     msg_type = msg.get("type")
     data = msg.get("data")
 
@@ -167,6 +176,12 @@ def change_page(msg):
     elif msg_type == "SET_SUCCESS":
         ui_queue.put(("route", "/setter_page"))
 
+    elif msg_type == "NOT_ENOUGH_PLAYER":
+        def update_ui():
+            not_enough_player_text.value = "玩家不足兩人，無法開始遊戲"
+            page_ref.update()
+        ui_queue.put(("refresh", update_ui))
+
     elif msg_type == "GAME_START":
         ui_queue.put(("route", "/game_page"))
 
@@ -197,6 +212,15 @@ def change_page(msg):
                 ft.Text(history_msg, size=16) for history_msg in setter_history_list
             ]
             page_ref.update()
+        ui_queue.put(("refresh", update_ui))
+
+    elif msg_type == "IMAGE":
+        base64_data = data
+        new_image = ft.Image(src=f"data:image/png;base64,{base64_data}", width=100, height=100, fit="contain")
+        def update_ui():
+            image_column.controls.append(new_image)
+            page_ref.update()
+
         ui_queue.put(("refresh", update_ui))
 
     elif msg_type == "SOMEONE_GUESS":
@@ -230,7 +254,7 @@ def change_page(msg):
 
 def reset():
     global system_list, system_column, remain_chance, remain_text, history_list, history_column, setter_history_list
-    global setter_history_column, set_wrong_text
+    global setter_history_column, set_wrong_text, image_column
     system_list.clear()
     system_column.controls.clear()
     remain_chance = None
@@ -240,6 +264,7 @@ def reset():
     setter_history_list.clear()
     setter_history_column.controls.clear()
     set_wrong_text.value = ""
+    image_column.controls.clear()
 
 def process_ui_queue(page):
     try:
@@ -275,7 +300,7 @@ def register(page):
             SERVER_IP = ip_input.value.strip()
 
         connect_server(SERVER_IP)
-        send_queue.put(player_name)
+        send_queue.put({"type": "string", "data": player_name})
         print(f"送出: {player_name}")
         print(f"設定: {SERVER_IP}")
 
@@ -310,11 +335,11 @@ def register(page):
 
 def mode_choose(page):
     def create_room(e):
-        send_queue.put("1")
+        send_queue.put({"type": "string", "data": "1"})
         print("送出: 創建房間")
 
     def join_room(e):
-        send_queue.put("2")
+        send_queue.put({"type": "string", "data": "2"})
         print("送出: 創建房間")
         
     return ft.View(
@@ -381,7 +406,7 @@ def host_setting(page):
         global answer_len
         answer_len = password_len_input.value
         send_msg = room_id_input.value.strip() + '\n' + password_len_input.value + '\n' + round_num_input.value
-        send_queue.put(send_msg)
+        send_queue.put({"type": "string", "data": send_msg})
         print("送出: 房間創建完成")
 
     return ft.View(
@@ -421,7 +446,7 @@ def host_setting(page):
 def join_room(page):
     room_id = ft.TextField(label="請輸入房號",border_radius=15,width=280,)
     def join_room_click(e):
-        send_queue.put(room_id.value.strip())
+        send_queue.put({"type": "string", "data": room_id.value.strip()})
         print("送出: 加入房間")
 
     return ft.View(
@@ -454,7 +479,7 @@ def join_room(page):
 
 def room_waiting_host(page):
     def start(e):
-        send_queue.put("start")
+        send_queue.put({"type": "string", "data": "start"})
         print("送出: 開始遊戲")
     
     return ft.View(
@@ -473,6 +498,7 @@ def room_waiting_host(page):
                                 controls=[
                                     ft.Text("WAITING...",size=30,weight=ft.FontWeight.BOLD,color=COLOR_ORANGE),
                                     ft.Text("等待房主開始遊戲",size=16,color=COLOR_TEXT),
+                                    not_enough_player_text,
                                     ft.Divider(color=COLOR_PEACH, thickness=2),
                                     ft.Text("房間成員",size=16,color=COLOR_TEXT,weight=ft.FontWeight.BOLD,),
                                     ft.Container(height=120,content=members_column,),
@@ -522,7 +548,7 @@ def set_answer(page):
     def start_click(e):
         global curr_answer
         curr_answer = ans_input.value.strip()
-        send_queue.put(curr_answer)
+        send_queue.put({"type": "string", "data": curr_answer})
         print(f"送出: {curr_answer}")
 
     return ft.View(
@@ -554,12 +580,15 @@ def set_answer(page):
             )
 
 def game_page(page):
+    # 系統訊息
     system_note = ft.Column(
             height=50,
             width=350,
             scroll=ft.ScrollMode.AUTO,
             controls=system_column,
         )
+    
+    # 歷史紀錄
     history = ft.Column(
             height=200,
             width=350,
@@ -567,6 +596,7 @@ def game_page(page):
             controls=history_column,
         )
     
+    # 標記 button
     def toggle_button(e):
         btn = e.control
         if btn.bgcolor == COLOR_PEACH:
@@ -579,19 +609,51 @@ def game_page(page):
         btn = ft.Button(str(i),width=55,height=30,bgcolor=COLOR_PEACH,color=COLOR_TEXT,on_click=toggle_button,)
         buttons.append(btn)
 
+    # 送出猜測
     guess=ft.TextField(label="請輸入猜測", expand=True)
     def click_send(e):
-        send_queue.put(guess.value.strip())
+        send_queue.put({"type": "string", "data": guess.value.strip()})
         guess.value = ""
         print(f"送出: guess")
+
+    # 傳輸照片
+    async def handle_pick_and_send_file(e):
+        files = await ft.FilePicker().pick_files(allow_multiple=False,file_type=ft.FilePickerFileType.IMAGE)
+        if not files:
+            print("使用者取消選取照片")
+            return
+
+        selected_file = files[0]
+        print(f"正在處理照片: {selected_file.name}")
+        
+        try:
+            with open(selected_file.path, "rb") as image_file:
+                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+            send_queue.put({"type": "image","data": encoded_string})
+            print(f"照片 {selected_file.name} 已塞入發送佇列")
+            
+        except Exception as ex:
+            print(f"讀取或發送照片失敗: {ex}")
 
     return ft.View(
                 route="/game_page",
                 vertical_alignment=ft.MainAxisAlignment.CENTER,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
-                    ft.Text("ROUND",weight=ft.FontWeight.BOLD,size=30,color=COLOR_ORANGE),
-                    ft.Container(height=5),
+                    ft.Column(
+                        height=100,
+                        width=350,
+                        controls=[
+                            ft.Row(
+                                controls=[
+                                    ft.Text("ROUND",weight=ft.FontWeight.BOLD,size=30,color=COLOR_ORANGE),
+                                    ft.Container(width=5),
+                                    image_column,
+                                ]
+                            )                            
+                        ]
+                    ),
                     ft.Card(
                         content=ft.Container(
                             width=350,
@@ -626,6 +688,7 @@ def game_page(page):
                                     ft.Container(height=5),
                                     ft.Row(
                                         controls=[
+                                            ft.IconButton(ft.Icons.ADD,width=50,height=40,icon_color=COLOR_GREEN_TEXT, on_click=handle_pick_and_send_file),
                                             guess,
                                             ft.IconButton(ft.Icons.SEND,width=50,height=40,icon_color=COLOR_GREEN_TEXT, on_click=click_send,)
                                         ]
@@ -657,8 +720,19 @@ def setter_page(page):
                 vertical_alignment=ft.MainAxisAlignment.CENTER,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
-                    ft.Text("ROUND",weight=ft.FontWeight.BOLD,size=30,color=COLOR_ORANGE),
-                    ft.Container(height=5),
+                    ft.Column(
+                        height=100,
+                        width=350,
+                        controls=[
+                            ft.Row(
+                                controls=[
+                                    ft.Text("ROUND",weight=ft.FontWeight.BOLD,size=30,color=COLOR_ORANGE),
+                                    ft.Container(width=5),
+                                    image_column,
+                                ]
+                            )                            
+                        ]
+                    ),
                     ft.Card(
                         content=ft.Container(
                             width=350,
@@ -696,7 +770,7 @@ def setter_page(page):
 
 def curr_rank(page):
     def next_round(e):
-        send_queue.put("check")
+        send_queue.put({"type": "string", "data": "check"})
         print("送出: 確認進入下一輪")
 
     return ft.View(
@@ -729,7 +803,7 @@ def curr_rank(page):
 
 def final_rank(page):
     def next_round(e):
-        send_queue.put("check")
+        send_queue.put({"type": "CONFIRM_GAME_OVER", "data": "1"})
         print("送出: 確認結束")
 
     return ft.View(
@@ -762,7 +836,7 @@ def final_rank(page):
 
 def no_one_guess(page):
     def next_round(e):
-        send_queue.put("check")
+        send_queue.put({"type": "string", "data": "check"})
         print("送出: 進入 curr rank")
 
     return ft.View(
